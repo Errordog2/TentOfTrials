@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-06-16T15:40:00+00:00",
+  "issue": 49,
+  "diagnostic_logd": "diagnostic/build-task-marker-audit.logd",
+  "total_entries": 322,
+  "validation": [
+    {
+      "name": "case-insensitive marker scan",
+      "result": "322 rows generated"
+    },
+    {
+      "name": "estimate formula",
+      "result": "every row matches (line_number % 7) + 1"
+    },
+    {
+      "name": "sort order",
+      "result": "entries are sorted by estimated hours descending"
+    },
+    {
+      "name": "self-reference check",
+      "result": "report content does not introduce new marker text"
+    },
+    {
+      "name": "build.py syntax",
+      "command": "python -m py_compile build.py",
+      "result": "passed"
+    }
+  ],
+  "build_attempt": {
+    "command": "python build.py -m frailbox --verbose",
+    "status": "failed_before_compile",
+    "reason": "Local Windows host lacks gcc, g++, make, and cmake."
+  },
+  "pr_note": "Diagnostic bundle records the local validation and build attempt honestly. Full repository build could not start on this host because the required C toolchain is unavailable."
+}
