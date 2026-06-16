@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-06-16T16:08:53.587124+00:00",
+  "commit": "dfa2dbea",
+  "diagnostic_logd": "diagnostic/build-dfa2dbea.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "94edc2e2d446de2c04ff",
+  "decrypt_command": "encryptly unpack diagnostic/build-dfa2dbea.logd <outdir> --password 94edc2e2d446de2c04ff",
+  "total_modules": 1,
+  "passed": 0,
+  "failed": 1,
+  "modules": [
+    {
+      "name": "frailbox",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-dfa2dbea.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
