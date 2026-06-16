@@ -835,7 +835,6 @@ Diagnostic bundle:
         print(f"\n  {color('⚠ Some tools missing  -  will try anyway:', Colors.YELLOW)}")
         for m in missing:
             print(f"    {m}")
-
         msg = "Not all modules will build. That's fine."
         print(f"  {color(msg, Colors.GRAY)}")
     else:

@@ -379,10 +379,13 @@ int log_init(void)
     if (env_log_file != NULL && strlen(env_log_file) > 0) {
         g_log_file = fopen(env_log_file, "a");
         if (g_log_file == NULL) {
-            fprintf(stderr, "Failed to open log file '%s': %s\n",
-                    env_log_file, strerror(errno));
+            int open_errno = errno;
             /* Fall back to stderr */
             g_log_file = stderr;
+            pthread_mutex_unlock(&log_mutex);
+            LOG_ERROR("Failed to open log file '%s': %s",
+                      env_log_file, strerror(open_errno));
+            pthread_mutex_lock(&log_mutex);
         }
     } else {
         g_log_file = stderr;
@@ -556,11 +559,14 @@ void log_shutdown(void)
         g_log_file = NULL;
     }
 
+    pthread_mutex_unlock(&log_mutex);
+
+    LOG_INFO("Legacy logging subsystem shut down.");
+
+    pthread_mutex_lock(&log_mutex);
     g_log_level = LOG_LEVEL_NONE;
 
     pthread_mutex_unlock(&log_mutex);
-
-    fprintf(stderr, "Legacy logging subsystem shut down.\n");
 }
 
 /**
@@ -595,10 +601,11 @@ int log_dump_ring_buffer(int fd)
 
     written += snprintf(ring_buf + written, sizeof(ring_buf) - written,
         "=== END RING BUFFER DUMP ===\n");
-    ssize_t _written = write(fd, ring_buf, written);
-    (void)_written;  // suppress unused-result warning. the ring buffer dump is best-effort.
 
     pthread_mutex_unlock(&g_ring_buffer.ring_mutex);
+
+    LOG_DEBUG("Ring buffer dump requested for fd=%d:\n%s", fd, ring_buf);
+
     return count;
 }
 
