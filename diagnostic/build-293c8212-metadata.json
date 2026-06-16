@@ -1,0 +1,28 @@
+{
+  "generated_at": "2026-06-16T15:20:00+00:00",
+  "commit": "293c8212a7a7567eaf7823bb2a1d9e9e004797e1",
+  "diagnostic_logd": "diagnostic/build-293c8212.logd",
+  "total_modules": 1,
+  "passed": 0,
+  "failed": 1,
+  "modules": [
+    {
+      "name": "frailbox",
+      "language": "C",
+      "command": "python build.py -m frailbox --verbose",
+      "status": "failed_before_compile",
+      "reason": "Local Windows host lacks gcc, g++, make, and cmake."
+    }
+  ],
+  "static_checks": [
+    {
+      "command": "rg \"fprintf\\\\(stderr|\\\\bwrite\\\\s*\\\\(fd\" frailbox/src/logger.c -n",
+      "result": "no target raw logger writes found"
+    },
+    {
+      "command": "python -m py_compile build.py",
+      "result": "passed"
+    }
+  ],
+  "pr_note": "Diagnostic bundle records the local build attempt honestly. C compilation could not start on this host because the required C toolchain is unavailable."
+}
