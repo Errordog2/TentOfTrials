@@ -1,0 +1,43 @@
+TentOfTrials diagnostic build attempt for PR targeting issue #41
+
+Scope: Add complete type hints to tools/ai_reviewer.py without using Any.
+Host: Windows, Python 3.11
+
+Commands run:
+
+1. rg "\bAny\b" tools/ai_reviewer.py -n
+   Result: no Any found
+
+2. AST annotation check
+   Result: every function has parameter and return annotations.
+
+3. python -m py_compile tools/ai_reviewer.py
+   Result: passed
+
+4. python tools/ai_reviewer.py --path tools/ai_reviewer.py
+   Result: exited 0 and produced a review report.
+
+5. python build.py -m frailbox --verbose
+   Result: failed before compiling C sources because the host lacks the C build toolchain.
+
+Build output summary:
+
+Checking prerequisites...
+
+Some tools missing - will try anyway:
+  Go (go)
+  C (GCC) (gcc)
+  C++ (GCC) (g++)
+  CMake (cmake)
+  Make (make)
+  Java (JDK) (javac)
+  Ruby (ruby)
+  Lua (luac)
+  GHC (Haskell) (ghc)
+
+Building frailbox (C)...
+frailbox: FAIL (0.0s)
+last output:
+Command not found: [WinError 2] system cannot find the specified file.
+
+The PR also includes the minimal build.py string-literal fix needed for the build script to parse under Python 3.11.

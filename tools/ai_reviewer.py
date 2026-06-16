@@ -37,7 +37,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Tuple, TypedDict
 
 # Configure logging
 logging.basicConfig(
@@ -112,6 +112,7 @@ class ReviewSeverity(Enum):
     """Severity levels for review findings."""
 
     CRITICAL = "critical"
+    HIGH = "high"
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
@@ -207,6 +208,17 @@ class ProjectReviewReport:
     suggestions: int
     file_results: List[FileReviewResult] = field(default_factory=list)
     summary: str = ""
+
+
+class SecurityPattern(TypedDict):
+    """Pattern definition used by the security auditor."""
+
+    id: str
+    name: str
+    severity: ReviewSeverity
+    pattern: str
+    message: str
+    effort: int
 
 
 # ---------------------------------------------------------------------------
@@ -357,10 +369,10 @@ class CodeQualityAnalyzer:
 class SecurityAuditor:
     """Detects security vulnerabilities using AI pattern matching."""
 
-    def __init__(self):
-        self.patterns: List[Dict[str, Any]] = self._initialize_patterns()
+    def __init__(self) -> None:
+        self.patterns: List[SecurityPattern] = self._initialize_patterns()
 
-    def _initialize_patterns(self) -> List[Dict[str, Any]]:
+    def _initialize_patterns(self) -> List[SecurityPattern]:
         """Initialize security vulnerability patterns."""
         return [
             {
@@ -544,7 +556,7 @@ class AiCodeReviewer:
     Generates detailed review reports with severity levels and actionable suggestions.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.quality_analyzer = CodeQualityAnalyzer()
         self.security_auditor = SecurityAuditor()
         self.performance_profiler = PerformanceProfiler()
@@ -678,10 +690,11 @@ class AiCodeReviewer:
         # Sort findings by severity
         severity_order = {
             ReviewSeverity.CRITICAL: 0,
-            ReviewSeverity.ERROR: 1,
-            ReviewSeverity.WARNING: 2,
-            ReviewSeverity.INFO: 3,
-            ReviewSeverity.SUGGESTION: 4,
+            ReviewSeverity.HIGH: 1,
+            ReviewSeverity.ERROR: 2,
+            ReviewSeverity.WARNING: 3,
+            ReviewSeverity.INFO: 4,
+            ReviewSeverity.SUGGESTION: 5,
         }
         result.findings.sort(key=lambda f: (severity_order.get(f.severity, 99), f.line_number))
 
@@ -825,6 +838,7 @@ def main() -> int:
         for f in result.findings:
             severity_icon = {
                 ReviewSeverity.CRITICAL: "🔴",
+                ReviewSeverity.HIGH: "🟤",
                 ReviewSeverity.ERROR: "🟠",
                 ReviewSeverity.WARNING: "🟡",
                 ReviewSeverity.INFO: "🔵",
