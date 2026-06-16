@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-06-16T16:05:13.967581+00:00",
+  "commit": "d64aa40c",
+  "diagnostic_logd": "diagnostic/build-d64aa40c.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "97b471cd51c6ed2fdfec",
+  "decrypt_command": "encryptly unpack diagnostic/build-d64aa40c.logd <outdir> --password 97b471cd51c6ed2fdfec",
+  "total_modules": 1,
+  "passed": 0,
+  "failed": 1,
+  "modules": [
+    {
+      "name": "frailbox",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-d64aa40c.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
