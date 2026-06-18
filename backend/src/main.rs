@@ -9,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 #[command(name = "tent-backend")]
 #[command(about = "Tent of Trials Backend - Distributed Microservices Framework", long_about = None)]
 struct Cli {
-
     #[arg(short, long, default_value = "node-0")]
     node_id: String,
 
@@ -28,8 +27,13 @@ struct Cli {
 // It's 30 lines of config loading and then it spawns a server.
 // Actually it's like 50 lines. Still too fucking many.
 async fn main() -> Result<()> {
+    let runtime_config = tent_backend::config::Config::from_env()?;
+
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .or_else(|_| EnvFilter::try_new(&runtime_config.log_level))?,
+        )
         .json()
         .init();
 
@@ -40,10 +44,23 @@ async fn main() -> Result<()> {
         consensus = %cli.consensus,
         max_connections = %cli.max_connections,
         config = %cli.config,
+        backend_host = %runtime_config.host,
+        backend_port = runtime_config.port,
+        experimental_enabled = runtime_config.enable_experimental,
         "initializing tent backend orchestration framework"
     );
 
-    let config = tent_backend::config::load_config(&cli.config).await?;
+    let mut config = tent_backend::config::load_config(&cli.config).await?;
+    config.service.host = runtime_config.host.clone();
+    config.service.port = runtime_config.port;
+
+    tracing::info!(
+        service = %config.service.name,
+        host = %config.service.host,
+        port = config.service.port,
+        "backend runtime configuration applied"
+    );
+
     let registry = ServiceRegistry::new(config.registry.clone());
     let discovery = ServiceDiscovery::new(config.discovery.clone());
     let broker = MessageBroker::new(config.messaging.clone());
@@ -54,9 +71,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("all subsystems initialized successfully, entering main loop");
 
-    let mut signal = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         _ = signal.recv() => {

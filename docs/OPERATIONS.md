@@ -15,6 +15,23 @@
 
 ## Monitoring
 
+## Backend Runtime Configuration
+
+The backend reads a small set of environment variables at startup. Values from
+these variables override the safe local defaults before subsystem initialization,
+so deployments can change the bind address, port, log level, and experimental
+feature gate without editing the TOML config file.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOT_BACKEND_HOST` | `0.0.0.0` | Bind host advertised in backend service configuration. Empty values fall back to the default. |
+| `TOT_BACKEND_PORT` | `8080` | Backend service port. Must be a valid TCP port from `1` to `65535`. |
+| `TOT_LOG_LEVEL` | `info` | Default `tracing_subscriber` filter used when `RUST_LOG` is not set. |
+| `TOT_ENABLE_EXPERIMENTAL` | `false` | Enables experimental backend feature paths. Accepted boolean values are `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. |
+
+Invalid port or boolean values stop startup with a descriptive configuration
+error instead of silently falling back.
+
 ### Health Check Endpoints
 
 Each service exposes a health check endpoint:
