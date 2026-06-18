@@ -1,0 +1,87 @@
+{
+  "generated_at": "2026-06-18T07:58:41.086082+00:00",
+  "commit": "cee94cce",
+  "diagnostic_logd": "diagnostic/build-cee94cce.logd",
+  "diagnostic_logd_error": null,
+  "message_blocker": null,
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "11a89068b464188aa307",
+  "decrypt_command": "encryptly unpack diagnostic/build-cee94cce.logd <outdir> --password 11a89068b464188aa307",
+  "total_modules": 10,
+  "passed": 2,
+  "failed": 8,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'cargo'"
+    },
+    {
+      "name": "frontend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'npm'"
+    },
+    {
+      "name": "market",
+      "status": "PASS",
+      "elapsed_seconds": 10.638,
+      "artifact": "/src/market/market",
+      "output": "go: downloading go.uber.org/zap v1.27.0\ngo: downloading github.com/gorilla/websocket v1.5.3\ngo: downloading github.com/shopspring/decimal v1.4.0\ngo: downloading github.com/google/uuid v1.6.0\ngo: downloading go.uber.org/multierr v1.10.0"
+    },
+    {
+      "name": "frailbox",
+      "status": "PASS",
+      "elapsed_seconds": 0.042,
+      "artifact": "/src/frailbox/frailbox",
+      "output": "make: Nothing to be done for 'all'."
+    },
+    {
+      "name": "engine",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'cmake'"
+    },
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'javac'"
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'ruby'"
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'luac'"
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'ghc'"
+    },
+    {
+      "name": "openapi-tools",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null,
+      "output": "Command not found: [Errno 2] No such file or directory: 'luac'"
+    }
+  ],
+  "pr_note": "Include the encrypted diagnostic logd artifact(s): diagnostic/build-cee94cce.logd. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
