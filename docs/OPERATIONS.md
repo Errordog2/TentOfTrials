@@ -85,6 +85,33 @@ Alerts are sent to PagerDuty and Slack (#ops-alerts channel).
 | DBConnectionPool | Pool exhaustion risk | Critical | 10 minutes |
 | QueueBacklog | Queue depth > 10000 for 5 minutes | Warning | 15 minutes |
 
+### v2 Log Watchdog Configuration Reload
+
+The v2 log watchdog reads `/etc/tent/watchdog.yaml` by default, or a file
+provided with `--config`. The file can configure Slack alert delivery,
+overlong-line forensic output, and pattern definitions. A minimal example is
+available at `v2/config/watchdog.example.yaml`.
+
+Reload a running watchdog after editing the config:
+
+```bash
+kill -HUP "$(cat /tmp/v2-watchdog.pid)"
+```
+
+Reloadable keys:
+
+- `slack_webhook`: Slack incoming webhook URL.
+- `slack_proxy`: optional HTTP proxy used by Slack alert delivery.
+- `forensic_file`: JSONL destination for overlong watchdog lines.
+- `patterns`: replacement pattern list with `name`, `regex`, `severity`, and
+  `cooldown`.
+
+Validate config reload behavior locally:
+
+```bash
+perl v2/scripts/log_watchdog.pl --smoke-config-reload
+```
+
 ## Incident Response
 
 ### Severity Levels

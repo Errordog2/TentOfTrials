@@ -160,7 +160,7 @@ sub pattern_from_config {
 
 sub apply_config {
     my ($config) = @_;
-    die "config must be a JSON object" unless ref($config) eq 'HASH';
+    die "config must be an object" unless ref($config) eq 'HASH';
 
     $slack_webhook = "$config->{slack_webhook}" if exists $config->{slack_webhook};
     if (exists $config->{slack_proxy}) {
@@ -183,10 +183,74 @@ sub load_config_file {
     my ($path) = @_;
     open(my $fh, '<', $path) or die "open $path: $!";
     local $/;
-    my $json = <$fh>;
+    my $body = <$fh>;
     close($fh);
-    my $config = decode_json($json);
+    my $config = parse_config_body($body, $path);
     apply_config($config);
+}
+
+sub parse_config_body {
+    my ($body, $path) = @_;
+    return decode_json($body) if $body =~ /^\s*[\{\[]/;
+    return parse_simple_yaml_config($body, $path);
+}
+
+sub strip_yaml_quotes {
+    my ($value) = @_;
+    $value =~ s/^\s+|\s+$//g;
+    return undef if $value eq '' || $value eq 'null' || $value eq '~';
+    if ($value =~ /^"(.*)"$/s || $value =~ /^'(.*)'$/s) {
+        return $1;
+    }
+    return $value;
+}
+
+sub parse_yaml_scalar {
+    my ($value) = @_;
+    $value =~ s/\s+#.*$//;
+    return strip_yaml_quotes($value);
+}
+
+sub parse_simple_yaml_config {
+    my ($body, $path) = @_;
+    my %config;
+    my @loaded_patterns;
+    my $current_pattern;
+    my $in_patterns = 0;
+
+    for my $raw_line (split /\n/, $body) {
+        $raw_line =~ s/\r$//;
+        next if $raw_line =~ /^\s*(?:#.*)?$/;
+
+        if ($raw_line =~ /^patterns:\s*$/) {
+            $in_patterns = 1;
+            next;
+        }
+
+        if (!$in_patterns && $raw_line =~ /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            $config{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        if ($in_patterns && $raw_line =~ /^\s*-\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            push @loaded_patterns, $current_pattern if defined $current_pattern;
+            $current_pattern = {};
+            $current_pattern->{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        if ($in_patterns && $raw_line =~ /^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            die "pattern property before pattern entry in $path" unless defined $current_pattern;
+            $current_pattern->{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        die "unsupported config syntax in $path: $raw_line";
+    }
+
+    push @loaded_patterns, $current_pattern if defined $current_pattern;
+    $config{patterns} = \@loaded_patterns if @loaded_patterns;
+    return \%config;
 }
 
 sub reload_config {
@@ -535,6 +599,7 @@ sub run_config_reload_smoke {
         die "cooldown did not reload" unless $patterns[0]->{cooldown} == 7;
     };
     my $err = $@;
+    my $loaded_pattern_count = scalar(@patterns);
 
     unlink $tmp if -e $tmp;
     $config_file = $original_config_file;
@@ -544,7 +609,7 @@ sub run_config_reload_smoke {
     @patterns = @original_patterns;
     die $err if $err;
 
-    say encode_json({ status => 'ok', reload => JSON::PP::true, patterns => scalar(@patterns) });
+    say encode_json({ status => 'ok', reload => JSON::PP::true, loaded_patterns => $loaded_pattern_count });
 }
 
 # ===─ Main ===================================================================================================─

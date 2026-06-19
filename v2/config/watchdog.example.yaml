@@ -1,0 +1,16 @@
+# Example v2 log watchdog configuration.
+# Send SIGHUP to the process after editing this file to reload these settings.
+
+slack_webhook: "https://hooks.slack.com/services/T00/REPLACE/ME"
+slack_proxy: "http://proxy.internal:8080"
+forensic_file: "/var/log/tent/watchdog-overlong-lines.jsonl"
+
+patterns:
+  - name: FATAL_ERROR
+    regex: '\b(FATAL|CRITICAL|EMERGENCY)\b'
+    severity: critical
+    cooldown: 60
+  - name: DISK_FULL
+    regex: '\b(No space left|disk full|ENOSPC)\b'
+    severity: critical
+    cooldown: 30
