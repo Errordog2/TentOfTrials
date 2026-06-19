@@ -34,8 +34,61 @@ const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VIT
 // Request timeout in milliseconds. The default is 30 seconds which matches
 // the old API gateway timeout. Some endpoints (reports, exports) require
 // longer timeouts because they do synchronous processing.
-// TODO: Implement per-endpoint timeout configuration.
 const DEFAULT_TIMEOUT = 30000;
+
+type TimeoutPolicyCategory = 'reports' | 'exports';
+
+interface EndpointTimeoutPolicy {
+  category: TimeoutPolicyCategory;
+  timeout: number;
+  patterns: readonly RegExp[];
+  note: string;
+}
+
+// Endpoint-specific timeout policy.
+//
+// To add a new long-running endpoint safely:
+// 1. Keep DEFAULT_TIMEOUT unchanged so ordinary requests still fail fast.
+// 2. Add the narrowest path pattern possible under the matching category.
+// 3. Prefer an explicit config.timeout at the call site for one-off exceptions.
+const ENDPOINT_TIMEOUT_POLICIES: readonly EndpointTimeoutPolicy[] = [
+  {
+    category: 'reports',
+    timeout: 120000,
+    patterns: [
+      /(^|\/)reports(\/|$)/i,
+      /(^|\/)analytics\/reports(\/|$)/i,
+    ],
+    note: 'Synchronous report generation can exceed the gateway default.',
+  },
+  {
+    category: 'exports',
+    timeout: 180000,
+    patterns: [
+      /(^|\/)exports(\/|$)/i,
+      /(^|\/)analytics\/exports(\/|$)/i,
+      /(^|\/)workspaces\/[^/]+\/exports(\/|$)/i,
+    ],
+    note: 'Large export jobs can take longer than report generation.',
+  },
+] as const;
+
+function endpointTimeout(path: string): number {
+  const policy = ENDPOINT_TIMEOUT_POLICIES.find((candidate) =>
+    candidate.patterns.some((pattern) => pattern.test(path))
+  );
+  return policy?.timeout ?? DEFAULT_TIMEOUT;
+}
+
+export function resolveRequestTimeout(path: string, config?: Pick<RequestConfig, 'timeout'>): number {
+  return config?.timeout ?? endpointTimeout(path);
+}
+
+export const ApiTimeouts = {
+  default: DEFAULT_TIMEOUT,
+  reports: ENDPOINT_TIMEOUT_POLICIES.find((policy) => policy.category === 'reports')?.timeout ?? DEFAULT_TIMEOUT,
+  exports: ENDPOINT_TIMEOUT_POLICIES.find((policy) => policy.category === 'exports')?.timeout ?? DEFAULT_TIMEOUT,
+} as const;
 
 // Maximum number of retries for failed requests. The retry logic is
 // exponential backoff with jitter. The retry only applies to GET requests
@@ -208,7 +261,7 @@ async function request<T>(
   config?: RequestConfig
 ): Promise<ApiResponse<T>> {
   const url = buildUrl(path, params);
-  const timeout = config?.timeout ?? DEFAULT_TIMEOUT;
+  const timeout = resolveRequestTimeout(path, config);
   const maxRetries = config?.retries ?? (method === 'GET' ? MAX_RETRIES : 0);
 
   let requestConfig: RequestInit & { url: string } = {
