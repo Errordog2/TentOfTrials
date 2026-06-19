@@ -266,10 +266,13 @@ class MarketStreamAPI < Sinatra::Base
   # Return recent ticks for an instrument
   get '/api/v2/market/ticks/:instrument' do
     content_type :json
-    # TODO: Actually store and serve historical ticks.
-    # Right now this returns an empty array. The v1 API did the same thing.
-    # So technically this is not a regression. It's feature parity.
-    { instrument: params[:instrument], ticks: [], count: 0 }.to_json
+    instrument = params[:instrument]
+    limit = (params[:limit] || 100).to_i
+    limit = [[limit, 1].max, 1000].min
+
+    store = $tick_store || {}
+    ticks = store.fetch(instrument, []).last(limit)
+    { instrument: instrument, ticks: ticks, count: ticks.length }.to_json
   end
 
   # Return service status
@@ -302,6 +305,20 @@ end
 
 $start_time = Time.now.utc
 $message_count = 0
+$tick_store = {}
+$tick_store_mutex = Mutex.new
+
+def store_tick(tick)
+  $tick_store_mutex.synchronize do
+    instrument = tick[:instrument] || tick[:symbol]
+    return unless instrument
+    $tick_store[instrument] ||= []
+    $tick_store[instrument] << { price: tick[:price], volume: tick[:volume], ts: tick[:timestamp] || Time.now.utc.iso8601(3) }
+    if $tick_store[instrument].length > Constants::MAX_TICK_HISTORY
+      $tick_store[instrument] = $tick_store[instrument].last(Constants::MAX_TICK_HISTORY)
+    end
+  end
+end
 
 def start_service
   EM.run do
@@ -314,7 +331,13 @@ def start_service
       MarketStreamClient,
       ENV.fetch('INSTRUMENTS', 'BTC/USD,ETH/USD').split(','),
       ->(data) {
-        $message_count += data.is_a?(Array) ? data.length : 1
+        if data.is_a?(Array)
+          data.each { |tick| store_tick(tick) if tick.is_a?(Hash) }
+          $message_count += data.length
+        else
+          store_tick(data) if data.is_a?(Hash)
+          $message_count += 1
+        end
       },
       ->(error) {
         $logger.error "Market stream error: #{error.message}"
