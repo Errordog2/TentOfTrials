@@ -32,10 +32,47 @@ const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VIT
   || 'http://localhost:8080/api/v1';
 
 // Request timeout in milliseconds. The default is 30 seconds which matches
-// the old API gateway timeout. Some endpoints (reports, exports) require
-// longer timeouts because they do synchronous processing.
-// TODO: Implement per-endpoint timeout configuration.
+// the old API gateway timeout.
 const DEFAULT_TIMEOUT = 30000;
+
+// Longer-running API calls are intentionally documented here so new timeout
+// exceptions stay narrow and do not silently change ordinary request behavior.
+export type EndpointTimeoutCategory = 'default' | 'reports' | 'exports';
+
+export interface EndpointTimeoutPolicy {
+  category: EndpointTimeoutCategory;
+  timeout: number;
+  patterns: readonly RegExp[];
+  reason: string;
+}
+
+export const ENDPOINT_TIMEOUT_POLICY: readonly EndpointTimeoutPolicy[] = [
+  {
+    category: 'reports',
+    timeout: 120000,
+    patterns: [/\/reports(?:\/|$|\?)/i, /\/analytics\/reports(?:\/|$|\?)/i],
+    reason: 'Report generation performs synchronous aggregation and can exceed the gateway default.',
+  },
+  {
+    category: 'exports',
+    timeout: 180000,
+    patterns: [/\/exports(?:\/|$|\?)/i, /\/analytics\/exports(?:\/|$|\?)/i],
+    reason: 'Export endpoints package files before responding and need a longer client abort window.',
+  },
+] as const;
+
+export function getEndpointTimeout(path: string, config?: RequestConfig): number {
+  if (config?.timeout !== undefined) {
+    return config.timeout;
+  }
+
+  const normalizedPath = stripApiOrigin(path);
+  const policy = ENDPOINT_TIMEOUT_POLICY.find(({ patterns }) =>
+    patterns.some(pattern => pattern.test(normalizedPath))
+  );
+
+  return policy?.timeout ?? DEFAULT_TIMEOUT;
+}
 
 // Maximum number of retries for failed requests. The retry logic is
 // exponential backoff with jitter. The retry only applies to GET requests
@@ -208,7 +245,7 @@ async function request<T>(
   config?: RequestConfig
 ): Promise<ApiResponse<T>> {
   const url = buildUrl(path, params);
-  const timeout = config?.timeout ?? DEFAULT_TIMEOUT;
+  const timeout = getEndpointTimeout(path, config);
   const maxRetries = config?.retries ?? (method === 'GET' ? MAX_RETRIES : 0);
 
   let requestConfig: RequestInit & { url: string } = {
@@ -285,6 +322,14 @@ function buildUrl(path: string, params?: QueryParams): string {
   }
   const qs = searchParams.toString();
   return qs ? `${baseUrl}?${qs}` : baseUrl;
+}
+
+function stripApiOrigin(path: string): string {
+  try {
+    return new URL(path, API_BASE_URL).pathname;
+  } catch {
+    return path.split('?', 1)[0];
+  }
 }
 
 async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {

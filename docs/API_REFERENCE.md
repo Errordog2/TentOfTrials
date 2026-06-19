@@ -36,6 +36,31 @@ For development, use:
 http://localhost:8080/api/v3
 ```
 
+## Frontend Request Timeouts
+
+The frontend API client keeps ordinary requests on the 30 second default
+timeout. Long-running endpoints have a narrow, typed policy in
+`frontend/src/services/api.ts`:
+
+| Category | Endpoint pattern | Timeout |
+|----------|------------------|---------|
+| default | All endpoints without a specific policy | 30s |
+| reports | `/reports`, `/analytics/reports` | 120s |
+| exports | `/exports`, `/analytics/exports` | 180s |
+
+To add another endpoint-specific timeout, add a new
+`EndpointTimeoutPolicy` entry with a category, timeout, endpoint pattern, and
+reason. Keep the pattern specific to the long-running route so normal API
+calls continue to use the default timeout.
+
+Smoke check:
+
+```bash
+cd frontend
+npm run build
+node -e "const fs=require('fs'); const api=fs.readFileSync('src/services/api.ts','utf8'); if(!api.includes('DEFAULT_TIMEOUT = 30000') || !api.includes(\"category: 'reports'\") || !api.includes('timeout: 120000') || !api.includes(\"category: 'exports'\") || !api.includes('timeout: 180000')) process.exit(1); console.log('timeout policy smoke check passed')"
+```
+
 ## Authentication
 
 Most endpoints require authentication via Bearer token:
