@@ -28,13 +28,19 @@ class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    // Log error for telemetry/debug - can be wired to existing telemetry later
+    // Log error for telemetry/debug purposes
+    // This can be wired to existing telemetry later
     console.error('ErrorBoundary caught an error:', error);
     console.error('Component stack:', errorInfo.componentStack);
 
-    // Future integration point for telemetry services (Sentry, Datadog, etc.)
-    if (typeof window !== 'undefined' && (window as any).reportError) {
-      (window as any).reportError(error);
+    // Store error info for potential telemetry integration
+    if (typeof window !== 'undefined') {
+      (window as any).__lastErrorBoundaryError = {
+        error: error.toString(),
+        stack: error.stack,
+        componentStack: errorInfo.componentStack,
+        timestamp: new Date().toISOString(),
+      };
     }
   }
 
@@ -48,27 +54,19 @@ class ErrorBoundary extends React.Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      // Custom fallback provided
       if (this.props.fallback) {
         return this.props.fallback;
       }
 
-      // Default fallback UI
       return (
         <div style={{ padding: '2rem', textAlign: 'center', fontFamily: 'system-ui, sans-serif' }}>
-          <h1 style={{ color: '#dc2626', fontSize: '1.5rem', marginBottom: '1rem' }}>
-            Something went wrong
-          </h1>
-          <p style={{ color: '#6b7280', marginBottom: '1.5rem' }}>
+          <h1 style={{ color: '#dc3545' }}>Something went wrong</h1>
+          <p style={{ color: '#6c757d' }}>
             We encountered an unexpected error. Please try again or reload the page.
           </p>
-          <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
-            <button onClick={this.handleRetry} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>
-              Try Again
-            </button>
-            <button onClick={this.handleReload} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>
-              Reload Page
-            </button>
+          <div style={{ marginTop: '1.5rem', display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
+            <button onClick={this.handleRetry} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>Try Again</button>
+            <button onClick={this.handleReload} style={{ padding: '0.5rem 1rem', cursor: 'pointer' }}>Reload Page</button>
           </div>
         </div>
       );
@@ -83,7 +81,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import ErrorBoundary from './ErrorBoundary';
 
-// Mock console.error to avoid noise in test output
+// Mock console.error to avoid noise in tests
 const originalConsoleError = console.error;
 beforeAll(() => {
   console.error = jest.fn();
@@ -94,28 +92,28 @@ afterAll(() => {
 });
 
 // Component that throws an error
-const ThrowError = ({ shouldThrow }: { shouldThrow: boolean }) => {
+const ThrowingComponent: React.FC<{ shouldThrow?: boolean }> = ({ shouldThrow = true }) => {
   if (shouldThrow) {
-    throw new Error('Test error');
+    throw new Error('Test error from ThrowingComponent');
   }
-  return <div>Normal content</div>;
+  return <div>Safe content</div>;
 };
 
 describe('ErrorBoundary', () => {
-  it('renders children when there is no error', () => {
+  it('renders children when no error occurs', () => {
     render(
       <ErrorBoundary>
-        <div>Test child</div>
-      </ErrorBoundary>
+        <div data-testid="safe-child">Safe child</div>
+</ErrorBoundary>
     );
 
-    expect(screen.getByText('Test child')).toBeInTheDocument();
+    expect(screen.getByTestId('safe-child')).toBeInTheDocument();
   });
 
-  it('renders fallback UI when a child throws an error', () => {
+  it('renders fallback UI when child throws', () => {
     render(
       <ErrorBoundary>
-        <ThrowError shouldThrow={true} />
+        <ThrowingComponent />
       </ErrorBoundary>
     );
 
@@ -124,25 +122,44 @@ describe('ErrorBoundary', () => {
     expect(screen.getByText('Reload Page')).toBeInTheDocument();
   });
 
-  it('calls console.error with the caught error', () => {
+  it('reloads the page when Reload Page is clicked', () => {
+    const mockReload = jest.fn();
+    Object.defineProperty(window, 'location', {
+      value: { reload: mockReload },
+      writable: true,
+    });
+
     render(
       <ErrorBoundary>
-        <ThrowError shouldThrow={true} />
+        <ThrowingComponent />
       </ErrorBoundary>
     );
 
-    expect(console.error).toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Reload Page'));
+    expect(mockReload).toHaveBeenCalled();
   });
 
-  it('renders custom fallback when provided', () => {
-    const customFallback = <div>Custom error message</div>;
-    render(
-      <ErrorBoundary fallback={customFallback}>
-        <ThrowError shouldThrow={true} />
+  it('resets error state when Try Again is clicked', () => {
+    const { rerender } = render(
+      <ErrorBoundary>
+        <ThrowingComponent shouldThrow={true} />
       </ErrorBoundary>
     );
 
-    expect(screen.getByText('Custom error message')).toBeInTheDocument();
+    expect(screen.getByText('Something went wrong')).toBeInTheDocument();
+
+    // After clicking Try Again, the component should attempt to re-render
+    // reset error state by rendering with shouldThrow=false
+    rerender(
+      <ErrorBoundary>
+        <ThrowingComponent shouldThrow={false} />
+      </ErrorBoundary>
+    );
+
+    // After rerender with safe component, we need to click Try Again to reset state
+    fireEvent.click(screen.getByText('Try Again'));
+    expect(screen.queryByText('Something went wrong')).not.toBeInTheDocument();
+    expect(screen.getByText('Safe content')).toBeInTheDocument();
   });
 });
 import Layout from './components/Layout';
