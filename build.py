@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -646,6 +647,24 @@ def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
     print(f"    {color('✓', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
 
 
+def format_exception_diagnostic(exc: BaseException) -> str:
+    """Return traceback-rich context for unexpected diagnostic failures."""
+    lines = [
+        "Unexpected build.py failure",
+        "=" * 50,
+        f"type: {type(exc).__name__}",
+        f"message: {exc}",
+        f"cwd: {Path.cwd()}",
+        f"root: {ROOT}",
+        f"python: {sys.version.split()[0]} ({sys.executable})",
+        f"platform: {platform.platform()}",
+        "",
+        "traceback:",
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip(),
+    ]
+    return "\n".join(lines)
+
+
 def commit_diagnostic_artifacts(paths: list[Path], commit_id: str) -> bool:
     """Commit diagnostic files as soon as they are produced."""
     existing = [path for path in paths if path.exists()]
@@ -850,6 +869,42 @@ def generate_logd(
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def safe_generate_logd(
+    results: list[tuple[str, bool, float, str, Optional[str]]],
+    verbose: bool = False,
+) -> bool:
+    """Finalize diagnostics without letting finalization failures hide build output."""
+    try:
+        return generate_logd(results, verbose)
+    except Exception as exc:
+        logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
+        error = format_exception_diagnostic(exc)
+        print("    ERROR: Diagnostic finalization failed unexpectedly")
+        fallback_results = [
+            (
+                "diagnostic-finalizer",
+                False,
+                0.0,
+                error,
+                str(logd_path.relative_to(ROOT)) if logd_path.exists() else None,
+            )
+        ]
+        write_diagnostic_report(
+            metadata_path,
+            build_diagnostic_report(
+                fallback_results,
+                commit_id,
+                logd_error=error,
+                message_blocker="Diagnostic finalization failed; fallback JSON preserved the exception traceback.",
+            ),
+        )
+        try:
+            commit_diagnostic_artifacts([metadata_path], commit_id)
+        except Exception as commit_exc:
+            print(f"    ERROR: Could not commit fallback diagnostic metadata: {commit_exc}")
+        return False
+
+
 def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
     print(f"  {color('Build Summary', Colors.BOLD)}")
 
@@ -983,7 +1038,7 @@ Diagnostic bundle:
         print(f"  {color('✗ encryptly cannot run', Colors.RED)}")
         print(f"  {color('BLOCKER:', Colors.RED)} {blocker}")
         results = [("encryptly-preflight", False, elapsed, blocker, None)]
-        generate_logd(results, args.verbose)
+        safe_generate_logd(results, args.verbose)
         return 1
     print(f"  {color('✓ encryptly runs', Colors.GREEN)}")
 
@@ -998,9 +1053,25 @@ Diagnostic bundle:
 
     print_summary(results)
 
-    diagnostics_ok = generate_logd(results, args.verbose)
+    diagnostics_ok = safe_generate_logd(results, args.verbose)
 
     return 0 if diagnostics_ok and all(r[1] for r in results) else 1
 
+
+def run_main_safely() -> int:
+    """Run the CLI with a last-resort diagnostic report for unexpected crashes."""
+    started = time.time()
+    try:
+        return main()
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        elapsed = time.time() - started
+        output = format_exception_diagnostic(exc)
+        print(f"\n  {color('Unexpected build.py failure', Colors.RED)}")
+        print(f"  {color(str(exc), Colors.RED)}")
+        safe_generate_logd([("build.py", False, elapsed, output, None)])
+        return 1
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_main_safely())
