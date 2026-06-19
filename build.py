@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Build system entry point for the Tent of Trials multi-language workspace.
+
+This module defines the project modules, verifies local tool availability,
+runs build and clean commands, and emits the diagnostic artifacts used for
+pull request review.
+"""
 
 import argparse
 import datetime
