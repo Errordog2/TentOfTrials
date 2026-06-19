@@ -89,6 +89,8 @@ def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[s
             detail = f"HTTP {status}: {body[:100]}"
 
         return result, detail, status
+    except (socket.timeout, TimeoutError):
+        return "CRITICAL", f"HTTP timeout ({timeout}s)", 0
     except Exception as e:
         return "CRITICAL", str(e), 0
 
@@ -216,14 +218,17 @@ def run_health_checks(service: Optional[str] = None, json_output: bool = False) 
     for name, config in SERVICES.items():
         if service and name != service:
             continue
+        start = time.time()
         status, detail, code = check_http_service(
             config["host"], config["port"], config["path"], config["timeout"]
         )
+        latency = (time.time() - start) * 1000
         results["services"][name] = {
             "status": status,
             "detail": detail,
             "code": code,
             "endpoint": f"http://{config['host']}:{config['port']}{config['path']}",
+            "latency_ms": latency,
         }
         if status == "CRITICAL":
             all_ok = False
@@ -237,6 +242,7 @@ def run_health_checks(service: Optional[str] = None, json_output: bool = False) 
             "status": status,
             "detail": detail,
             "endpoint": f"{config['host']}:{config['port']}",
+            "latency_ms": latency,
         }
         if status == "CRITICAL":
             all_ok = False
