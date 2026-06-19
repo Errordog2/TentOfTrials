@@ -1,13 +1,13 @@
  ```diff
 --- a/v2/services/market_stream.rb
 +++ b/v2/services/market_stream.rb
-@@ -1,4 +1,5 @@
- #!/usr/bin/env ruby
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env ruby
 +#!/usr/bin/env ruby
  # frozen_string_literal: true
  
  # MarketStream  -  v2 Market Data Streaming Service
-@@ -93,6 +94,7 @@
+@@ -85,6 +85,7 @@
  require 'sinatra/base'
  require 'logger'
  
@@ -15,185 +15,189 @@
  # ===─ Fucking Constants =================================================================================─
  
  V2_VERSION = '2.0.0'
-@@ -153,6 +155,7 @@
- # We found a `puts "fuck"` statement in the v1 production cod
+@@ -147,6 +148,7 @@
+   BATCH_FLUSH_INTERVAL = 0.1     # seconds. 100ms batches. Very modern.
+ end
  
- # ===─ MarketStream Class =================================================================================─
-+# ===─ MarketStream Class =================================================================================─
++
+ # ===─ Logger Setup ==========================================================================================
+ 
+ # In v2, we use a REAL logging framework with levels and everything.
+@@ -213,6 +215,7 @@
+   end
+ end
+ 
++
+ # ===─ MarketStream Core ===================================================================================
  
  class MarketStream
-   include Constants
-@@ -163,6 +166,7 @@
-     @subscriptions = {}
-     @tick_buffer = []
+@@ -228,6 +231,9 @@
      @buffer_mutex = Mutex.new
-+    @ring_buffer = RingBuffer.new(capacity: 1000) # bounded async ring buffer for tick batches
-     @running = false
-     @ws_client = nil
-     @reconnect_attempts = 0
-@@ -170,6 +174,7 @@
-     @redis_pool = Array.new(REDIS_POOL_SIZE) { Redis.new(timeout: REDIS_TIMEOUT) }
-     @redis_index = 0
-     @redis_mutex = Mutex.new
+     @tick_buffer = []
+     @flush_timer = nil
++    @ring_buffer = RingBuffer.new(1000) # bounded ring buffer for tick batches
 +    @drain_thread = nil
-   end
++    @shutdown = false
  
-   def redis
-@@ -195,6 +200,7 @@
+     # Callbacks
+     @on_tick = nil
+@@ -248,8 +254,8 @@
+   # Start the stream (connects WebSocket, starts timers, etc.)
    def start
-     return false if @running
- 
+     logger.info "[MarketStream] Starting v#{V2_VERSION} (build #{V2_BUILD})"
+-
+     connect_ws
 +    start_drain_worker
-     @running = true
-     @logger.info "[MarketStream] Starting v#{V2_VERSION} (build #{V2_BUILD})"
- 
-@@ -218,6 +224,7 @@
-   def stop
-     return false unless @running
- 
-+    stop_drain_worker
-     @logger.info "[MarketStream] Stopping..."
-     @running = false
-     EM.stop if EM.reactor_running?
-@@ -227,6 +234,7 @@
-   def restart
-     @logger.info "[MarketStream] Restarting..."
-     stop
-+    stop_drain_worker
-     sleep 1
-     start
+     start_flush_timer
    end
-@@ -283,6 +291,7 @@
-   # This is called by the WebSocket handler when a tick arrives.
-   def on_tick(raw_tick)
-     tick = normalize_tick(raw_tick)
-+    @ring_buffer.push(tick)
-     return unless tick
  
-     @buffer_mutex.synchronize do
-@@ -296,6 +305,7 @@
-   # Flush the tick buffer to Redis and any registered callbacks.
-   # TODO: This blocks the reactor under high load. Replace with a ring buffer
-   # and a single drain worker instead of spawning a thread per flush.
-+  # FIXED: Now uses RingBuffer with a single drain worker. See v2/lib/ring_buffer.rb.
+@@ -257,8 +263,9 @@
+   def stop
+     logger.info "[MarketStream] Stopping..."
+     @flush_timer&.cancel
++    @shutdown = true
++    @ring_buffer.close if @ring_buffer
+     disconnect_ws
+-    flush_buffer # final flush
+   end
+ 
+   # Register a callback for each tick batch
+@@ -310,6 +317,7 @@
+     end
+   end
+ 
++
+   # ===─ Buffer / Flush Logic ================================================================================
+ 
+   def start_flush_timer
+@@ -324,25 +332,49 @@
+     end
+   end
+ 
+-  # TODO: This is fucking terrible. We copy the buffer under a mutex, clear it,
+-  # then start an ad-hoc thread for every flush. At high throughput this blocks
+-  # and spawns threads like rabbits. We need a real bounded queue and a single
+-  # drain worker. Someone should write v2/lib/ring_buffer.rb and replace this.
++  # Flush the current tick buffer into the ring buffer as a batch.
++  # The ring buffer handles backpressure; if full, oldest batch is dropped.
    def flush_buffer
      batch = nil
- 
-@@ -303,6 +313,7 @@
+     @buffer_mutex.synchronize do
        batch = @tick_buffer.dup
        @tick_buffer.clear
      end
-+    @ring_buffer.drain(batch_size: 100) do |batch|
- 
+-
      return if batch.nil? || batch.empty?
- 
-@@ -316,6 +327,7 @@
-     # Call registered callbacks
-     @on_tick.call(batch) if @on_tick
-   end
++    @ring_buffer.push(batch)
 +  end
  
-   # Normalize a raw tick into our standard format.
-   def normalize_tick(raw)
-@@ -340,6 +352,7 @@
-   # Publish a batch of ticks to Redis.
-   def publish_to_redis(batch)
-     return if batch.nil? || batch.empty?
-+    return if batch.nil? || batch.empty?
+-    Thread.new do
+-      process_batch(batch)
+-    end
++  # Start a single drain worker thread that consumes batches from the ring buffer.
++  def start_drain_worker
++    @drain_thread = Thread.new do
++      loop do
++        break if @shutdown && @ring_buffer.empty?
++        batch = @ring_buffer.pop(timeout: 0.5)
++        if batch
++          process_batch(batch)
++        end
++      end
++    end
++  end
++
++  # Wait for the drain worker to finish processing remaining batches.
++  def drain
++    # Push a sentinel to ensure the worker wakes up if needed
++    @ring_buffer.push(:drain) unless @shutdown
++  end
++
++  # Graceful shutdown: signal shutdown, close ring buffer, wait for drain worker.
++  def shutdown!
++    @shutdown = true
++    @flush_timer&.cancel
++    @ring_buffer.close
++    @drain_thread&.join(5)
++    # Final flush of any remaining ticks
++    final_batch = nil
++    @buffer_mutex.synchronize do
++      final_batch = @tick_buffer.dup
++      @tick_buffer.clear
++    end
++    process_batch(final_batch) if final_batch && !final_batch.empty?
+   end
  
-     begin
-       channel = "#{REDIS_CHANNEL_PREFIX}ticks"
-@@ -360,6 +373,7 @@
-   # Record a batch of ticks to persistent storage.
-   def record_to_storage(batch)
-     return if batch.nil? || batch.empty?
-+    return if batch.nil? || batch.empty?
- 
-     begin
-       # In a real implementation, this would write to a database.
-@@ -377,6 +391,7 @@
-   # Update in-memory history for each instrument.
-   def update_history(batch)
-     return if batch.nil? || batch.empty?
-+    return if batch.nil? || batch.empty?
- 
-     batch.each do |tick|
-       instrument = tick[:instrument]
-@@ -391,6 +406,7 @@
-   # Start the periodic flush timer.
-   def start_flush_timer
-     @flush_timer = EM.add_periodic_timer(BATCH_FLUSH_INTERVAL) do
-+      # No-op: drain worker handles flushing now
-       flush_buffer
+   def process_batch(batch)
+@@ -356,6 +388,7 @@
      end
    end
-@@ -401,6 +417,7 @@
-   end
  
-   # WebSocket connection handlers
-+  # WebSocket connection handlers
++
+   # ===─ WebSocket Handlers ==================================================================================
+ 
    def on_open
-     @logger.info "[MarketStream] WebSocket connected"
-     @reconnect_attempts = 0
-@@ -445,6 +462,7 @@
+@@ -411,6 +444,7 @@
+     end
    end
  
-   # Reconnection with exponential backoff
-+  # Reconnection with exponential backoff
-   def schedule_reconnect
-     return unless @running
++
+   # ===─ Helpers =============================================================================================
  
-@@ -460,6 +478,7 @@
- Charter of the v2 rewrite. The v1 market stream was a goddamn
-     delay = [WS_RECONNECT_BASE * (2 ** @reconnect_attempts), WS_RECONNECT_MAX].min
-     @reconnect_attempts += 1
-+    delay = [WS_RECONNECT_BASE * (2 ** @reconnect_attempts), WS_RECONNECT_MAX].min
- 
-     @logger.info "[MarketStream] Reconnecting in #{delay}s (attempt #{@reconnect_attempts})"
- 
-@@ -469,6 +488,7 @@
+   def generate_subscription_id
+@@ -431,6 +465,7 @@
    end
+ end
  
-   # REST API (Sinatra)
-+  # REST API (Sinatra)
-   class API < Sinatra::Base
-     set :port, API_PORT
-     set :bind, API_HOST
-@@ -510,6 +530,7 @@
++
+ # ===─ Sinatra API ==========================================================================================
+ 
+ class MarketStreamAPI < Sinatra::Base
+@@ -478,6 +513,7 @@
    end
+ end
  
-   # Graceful shutdown
-+  # Graceful shutdown
-   def graceful_shutdown
-     @logger.info "[MarketStream] Graceful shutdown initiated..."
-     stop_flush_timer
-@@ -520,6 +541,7 @@
-   end
++
+ # ===─ CLI Entrypoint =======================================================================================
  
-   # Health check
-+  # Health check
-   def health
-     {
-       status: @running ? "running" : "stopped",
-@@ -531,6 +553,7 @@
-   end
- 
-   # Metrics
-+  # Metrics
-   def metrics
-     {
-       uptime: @running ? (Time.now - @start_time).to_i : 0,
-@@ -541,6 +564,7 @@
-   end
- 
-   # Instrument helpers
-+  # Instrument helpers
-   def subscribe_instrument(instrument)
-     return false if instrument.nil? || instrument.empty?
- 
-@@ -558,6 +582,7 @@
-   end
- 
-   # Unsubscribe from an instrument
-+  # Unsubscribe from an instrument
-  
+ if __FILE__ == $0
+@@ -496,6 +532,7 @@
+     stream = MarketStream.new
+     stream.start
+     MarketStreamAPI.set :stream, stream
++    at_exit { stream.shutdown! }
+     MarketStreamAPI.run! host: Constants::API_HOST, port: Constants::API_PORT
+   when 'stop'
+     puts "MarketStream stop not implemented. Use kill -9 like a civilized person."
+--- /dev/null
++++ b/v2/lib/ring_buffer.rb
+@@ -0,0 +1,95 @@
++# frozen_string_literal: true
++
++# RingBuffer - A bounded, thread-safe ring buffer for batch processing.
++#
++# Throughput/backpressure behavior:
++# - push: O(1). If the buffer is full, the oldest item is dropped (overwrite).
++# - pop:  O(1). Blocks until an item is available or timeout.
++# - Thread-safe via Mutex + ConditionVariable.
++# - Designed for high-throughput tick batching where unbounded growth is fatal.
++# - Backpressure: oldest batch dropped on overflow, so consumers always get the
++#   most recent data. This is preferable to unbounded memory growth or blocking
++#   producers in a market data context.
++
++class RingBuffer
++  class ClosedError < StandardError; end
++
++  # @param capacity [Integer] Maximum number of items in the buffer.
++  def initialize(capacity)
++    raise ArgumentError, 'capacity must be positive' unless capacity.is_a?(Integer) && capacity > 0
++    @capacity = capacity
++    @buffer = []
++    @mutex = Mutex.new
++    @cond = ConditionVariable.new
++    @closed = false
++  end
++
++  # Push an item into the ring buffer.
++  # If the buffer is full, the oldest item is dropped.
++  # Raises ClosedError if the buffer
