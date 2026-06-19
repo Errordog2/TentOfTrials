@@ -6,6 +6,7 @@ import getpass
 import json
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -324,6 +325,47 @@ def check_prerequisites() -> list[str]:
 
     return missing
 
+
+def relative_path(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def format_command(cmd: list[str]) -> str:
+    return shlex.join(cmd)
+
+
+def command_diagnostic(
+    module: Module,
+    cmd: list[str],
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> str:
+    lines = [
+        f"cwd: {relative_path(module.dir)}",
+        f"command: {format_command(cmd)}",
+        f"exit_code: {returncode}",
+    ]
+    if stdout.strip():
+        lines.extend(["--- stdout ---", stdout.strip()])
+    if stderr.strip():
+        lines.extend(["--- stderr ---", stderr.strip()])
+    return "\n".join(lines)
+
+
+def command_error_diagnostic(module: Module, cmd: list[str], error: Exception) -> str:
+    return "\n".join(
+        [
+            f"cwd: {relative_path(module.dir)}",
+            f"command: {format_command(cmd)}",
+            "exit_code: command-not-started",
+            f"error: {error}",
+        ]
+    )
+
 def build_module(
     module: Module,
     release: bool = False,
@@ -341,10 +383,11 @@ def build_module(
     if module.name == "frontend":
         node_modules = module.dir / "node_modules"
         if not node_modules.exists():
+            install_cmd = ["npm", "install"]
             print(f"       {color('npm install...', Colors.GRAY)}")
             try:
                 install_result = subprocess.run(
-                    ["npm", "install"],
+                    install_cmd,
                     cwd=str(module.dir),
                     capture_output=not verbose,
                     text=True,
@@ -352,17 +395,31 @@ def build_module(
                     env={k: v for k, v in env.items() if k != "NODE_ENV"},
                 )
                 if install_result.returncode != 0:
-                    return False, time.time() - start, f"npm install failed:\n{install_result.stderr}"
+                    output = command_diagnostic(
+                        module,
+                        install_cmd,
+                        install_result.returncode,
+                        install_result.stdout or "",
+                        install_result.stderr or "",
+                    )
+                    return False, time.time() - start, f"npm install failed:\n{output}"
             except subprocess.TimeoutExpired:
-                return False, time.time() - start, "npm install TIMEOUT (120s)"
+                return False, time.time() - start, (
+                    f"npm install TIMEOUT (120s)\n"
+                    f"cwd: {relative_path(module.dir)}\n"
+                    f"command: {format_command(install_cmd)}"
+                )
 
     if module.name == "engine":
 
         build_type = "Release" if release else "Debug"
+        cfg_cmd = [
+            "cmake", "-S", ".", "-B", "build",
+            f"-DCMAKE_BUILD_TYPE={build_type}",
+        ]
         try:
             cfg_result = subprocess.run(
-                ["cmake", "-S", ".", "-B", "build",
-                 f"-DCMAKE_BUILD_TYPE={build_type}"],
+                cfg_cmd,
                 cwd=str(module.dir),
                 capture_output=True,
                 text=True,
@@ -370,16 +427,22 @@ def build_module(
                 env=env,
             )
         except subprocess.TimeoutExpired:
-            return False, time.time() - start, "CMake configure TIMEOUT (120s)"
+            return False, time.time() - start, (
+                f"CMake configure TIMEOUT (120s)\n"
+                f"cwd: {relative_path(module.dir)}\n"
+                f"command: {format_command(cfg_cmd)}"
+            )
         except FileNotFoundError as e:
-            return False, 0, f"Command not found: {e}"
+            output = command_error_diagnostic(module, cfg_cmd, e)
+            return False, 0, f"Command not found:\n{output}"
         if cfg_result.returncode != 0:
-            output_lines = []
-            if cfg_result.stdout:
-                output_lines.append(cfg_result.stdout.strip())
-            if cfg_result.stderr:
-                output_lines.append(cfg_result.stderr.strip())
-            output = "\n".join(output_lines)
+            output = command_diagnostic(
+                module,
+                cfg_cmd,
+                cfg_result.returncode,
+                cfg_result.stdout or "",
+                cfg_result.stderr or "",
+            )
             return False, time.time() - start, (
                 f"CMake configure failed:\n{output}")
         if verbose:
@@ -393,6 +456,9 @@ def build_module(
         if release and module.name == "backend":
             cmd.append("--release")
 
+    if verbose:
+        print(f"       {color(format_command(cmd), Colors.GRAY)}")
+
     try:
         result = subprocess.run(
             cmd,
@@ -403,20 +469,26 @@ def build_module(
             timeout=300,
         )
     except subprocess.TimeoutExpired:
-        return False, time.time() - start, "BUILD TIMEOUT (300s)"
+        return False, time.time() - start, (
+            f"BUILD TIMEOUT (300s)\n"
+            f"cwd: {relative_path(module.dir)}\n"
+            f"command: {format_command(cmd)}"
+        )
     except FileNotFoundError as e:
-        return False, 0, f"Command not found: {e}"
+        output = command_error_diagnostic(module, cmd, e)
+        return False, 0, f"Command not found:\n{output}"
 
     elapsed = time.time() - start
-    output_lines = []
-
-    if result.stdout:
-        output_lines.append(result.stdout.strip())
-    if result.stderr:
-        output_lines.append(result.stderr.strip())
-
-    output = "\n".join(output_lines)
+    output = command_diagnostic(
+        module,
+        cmd,
+        result.returncode,
+        result.stdout or "",
+        result.stderr or "",
+    )
     success = result.returncode == 0
+    status = color("passed", Colors.GREEN) if success else color("failed", Colors.RED)
+    print(f"       {status} in {elapsed:.1f}s")
 
     return success, elapsed, output
 
