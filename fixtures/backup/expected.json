@@ -1,0 +1,9 @@
+{
+  "tables": {
+    "users": {"min_rows": 1000, "max_rows": 50000},
+    "orders": {"min_rows": 500, "max_rows": 100000},
+    "products": {"min_rows": 50, "max_rows": 5000},
+    "sessions": {"min_rows": 0, "max_rows": 10000}
+  },
+  "required_tables": ["users", "orders", "products"]
+}

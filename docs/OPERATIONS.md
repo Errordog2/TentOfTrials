@@ -140,12 +140,54 @@ Backups are verified weekly by restoring to a staging environment and running
 integrity checks. The verification process takes approximately 4 hours for a
 full database restore. The verification results are posted to `#ops-backups`.
 
-TODO: The backup verification process is partially automated. The restore is
-automated but the integrity checks require manual review. The manual review
-involves checking that the restored database has the expected row counts and
-that no tables are missing. The row count check was added after an incident
-where a backup was taken while a migration was running, resulting in an
-incomplete backup that restored without error but was missing 3 tables.
+#### Automated Verification
+
+Use the `tools/backup_verify.py` helper to validate restored databases:
+
+```bash
+# Print a sample manifest
+python tools/backup_verify.py --sample > expected.json
+
+# Verify a restored snapshot against expected counts
+python tools/backup_verify.py --manifest expected.json --snapshot restored.json
+
+# Dry-run to preview the expected manifest
+python tools/backup_verify.py --manifest expected.json --dry-run
+
+# JSON output for CI integration
+python tools/backup_verify.py --manifest expected.json --snapshot restored.json --format json
+```
+
+The manifest specifies expected row-count ranges per table and a list of
+required tables. The script exits with code 0 on pass, 1 on any mismatch,
+and 2 on invalid arguments.
+
+Sample manifest (`fixtures/backup/expected.json`):
+
+```json
+{
+  "tables": {
+    "users": {"min_rows": 1000, "max_rows": 50000},
+    "orders": {"min_rows": 500, "max_rows": 100000},
+    "products": {"min_rows": 50, "max_rows": 5000}
+  },
+  "required_tables": ["users", "orders", "products"]
+}
+```
+
+Sample failing output:
+
+```
+FAIL: 4 integrity check(s) failed:
+  - MISSING REQUIRED TABLE: products
+  - ROW COUNT TOO LOW: users has 100 rows, expected >= 1000
+  - ROW COUNT TOO LOW: orders has 50 rows, expected >= 500
+  - MISSING TABLE: products (expected 50-5000 rows)
+```
+
+The row count check was added after an incident where a backup was taken
+while a migration was running, resulting in an incomplete backup that
+restored without error but was missing 3 tables.
 
 ### Recovery Procedure
 

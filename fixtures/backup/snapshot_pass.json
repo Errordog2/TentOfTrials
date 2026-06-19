@@ -1,0 +1,8 @@
+{
+  "tables": {
+    "users": {"row_count": 5000},
+    "orders": {"row_count": 20000},
+    "products": {"row_count": 250},
+    "sessions": {"row_count": 3000}
+  }
+}
