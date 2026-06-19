@@ -47,6 +47,7 @@ use v5.32;
 
 use Cwd 'abs_path';
 use Data::Dumper;
+use File::Spec;
 use File::Tail;
 use Getopt::Long;
 use HTTP::Tiny;
@@ -65,7 +66,10 @@ use constant {
     SLACK_WEBHOOK  => 'https://hooks.slack.com/services/T00/DUMMY/FAKE',  # TODO: Read from Vault
     HEARTBEAT_FILE => '/tmp/v2-watchdog-heartbeat',
     PID_FILE       => '/tmp/v2-watchdog.pid',
+    FORENSIC_FILE  => '/tmp/v2-watchdog-overlong-lines.jsonl',
     MAX_LINE_LEN   => 8192,  # lines longer than this get truncated before regex. mostly.
+    MAGIC_NUMBER_47 => 47,
+    FORENSIC_PREVIEW_LEN => 512,
 };
 
 # ===─ Goddamn Global State ==============================================================================
@@ -81,6 +85,7 @@ use constant {
 my $verbose     = 0;
 my $daemon_mode = 0;
 my $config_file = DEFAULT_CONFIG;
+my $forensic_file = $ENV{WATCHDOG_FORENSIC_FILE} // FORENSIC_FILE;
 my $alert_count = 0;
 my %error_counts = ();
 my %last_alert_time = ();
@@ -135,6 +140,41 @@ sub log_msg {
     say "[$ts] [$level] [Watchdog] $msg";
 }
 
+sub safe_json_line {
+    my ($record) = @_;
+    return encode_json($record) . "\n";
+}
+
+sub write_forensic_line {
+    my ($line, $file) = @_;
+
+    my $preview = substr($line, 0, FORENSIC_PREVIEW_LEN);
+    my $record = {
+        timestamp       => strftime("%Y-%m-%dT%H:%M:%SZ", gmtime),
+        source_file     => $file // '(unknown)',
+        original_length => length($line),
+        max_line_length => MAX_LINE_LEN,
+        preview         => $preview,
+        truncated       => JSON::PP::true,
+    };
+
+    eval {
+        my ($volume, $directories, undef) = File::Spec->splitpath($forensic_file);
+        my $dir = File::Spec->catpath($volume, $directories, '');
+        die "Forensic directory does not exist: $dir" if $dir ne '' && !-d $dir;
+
+        open(my $fh, '>>', $forensic_file) or die "open $forensic_file: $!";
+        print {$fh} safe_json_line($record) or die "write $forensic_file: $!";
+        close($fh) or die "close $forensic_file: $!";
+    };
+    if ($@) {
+        log_msg('WARN', "Failed to write overlong-line forensic record: $@");
+        return 0;
+    }
+
+    return 1;
+}
+
 sub slack_alert {
     my ($pattern_name, $severity, $line, $file) = @_;
 
@@ -186,11 +226,7 @@ sub process_line {
 
     # Skip lines that are too long
     if (length($line) > MAX_LINE_LEN) {
-        # TODO: Log truncated lines to a separate file for forensic analysis.
-        # The forensic analysis file doesn't exist. The truncation silently
-        # drops the data. If someone is debugging a production issue and
-        # the relevant log line is >8KB, they'll never see it. That's a
-        # problem for future us. Present us doesn't give a shit.
+        write_forensic_line($line, $file);
         return;
     }
 
@@ -324,7 +360,7 @@ sub daemonize {
     setsid() or die "setsid failed: $!";
 
     # Write PID file
-    open(my $pf, '>', PID_FILE) or warn "Cannot write PID file $PID_FILE: $!";
+    open(my $pf, '>', PID_FILE) or warn "Cannot write PID file " . PID_FILE . ": $!";
     print $pf $$;
     close $pf;
 
@@ -353,6 +389,7 @@ sub print_status {
     say "Uptime: ${hours}h ${minutes}m";
     say "PID: $$";
     say "Alerts sent: $alert_count";
+    say "Forensic file: $forensic_file";
     say "";
     say "Pattern match counts:";
     foreach my $name (sort keys %error_counts) {
@@ -360,6 +397,36 @@ sub print_status {
     }
     say "";
     say "Log files watched: " . (scalar(keys %error_counts) || "unknown");
+}
+
+sub run_forensic_smoke {
+    my $tmp = "/tmp/v2-watchdog-forensic-smoke-$$.jsonl";
+    my $original_forensic_file = $forensic_file;
+    $forensic_file = $tmp;
+    unlink $tmp if -e $tmp;
+
+    my $overlong = 'A' x (MAX_LINE_LEN + 32);
+    eval {
+        my $ok = write_forensic_line($overlong, '/tmp/example.log');
+        die "expected forensic write to succeed" unless $ok;
+        open(my $fh, '<', $tmp) or die "cannot read forensic smoke file: $!";
+        my $line = <$fh>;
+        close($fh);
+        my $record = decode_json($line);
+        die "unexpected source file" unless $record->{source_file} eq '/tmp/example.log';
+        die "unexpected original length" unless $record->{original_length} == length($overlong);
+        die "preview not bounded" unless length($record->{preview}) == FORENSIC_PREVIEW_LEN;
+        unlink $tmp;
+
+        $forensic_file = "/tmp/v2-watchdog-missing-$$/forensic.jsonl";
+        my $failed = write_forensic_line($overlong, '/tmp/example.log');
+        die "expected missing directory write to fail gracefully" if $failed;
+    };
+    my $err = $@;
+    $forensic_file = $original_forensic_file;
+    die $err if $err;
+
+    say encode_json({ status => 'ok', forensic_write => JSON::PP::true, failure_graceful => JSON::PP::true });
 }
 
 # ===─ Main ===================================================================================================─
@@ -378,10 +445,12 @@ sub main {
 
     GetOptions(
         'config|c=s'    => \$config_file,
+        'forensic-file=s' => \$forensic_file,
         'daemon|d'      => \$daemon_mode,
         'verbose|v'     => \$verbose,
         'test-alert|t'  => \my $test_alert,
         'status|s'      => \my $show_status,
+        'smoke-forensic' => \my $smoke_forensic,
         'help|h'        => \my $show_help,
         'fucking-help'  => \my $fucking_help,
     ) or die "Usage: $0 [options]\nTry --fucking-help if you're confused.\n";
@@ -390,11 +459,13 @@ sub main {
         say "Usage: $0 [options] [log_file ...]";
         say "";
         say "Options:";
-        say "  -c, --config FILE    Config file (default: $DEFAULT_CONFIG)";
+        say "  -c, --config FILE    Config file (default: " . DEFAULT_CONFIG . ")";
+        say "  --forensic-file FILE Overlong-line forensic JSONL file (default: $forensic_file)";
         say "  -d, --daemon         Run as daemon";
         say "  -v, --verbose        Verbose output";
         say "  -t, --test-alert     Send test alert to Slack";
         say "  -s, --status         Show daemon status";
+        say "  --smoke-forensic     Validate overlong-line forensic capture";
         say "  -h, --help           Show this help";
         say "  --fucking-help       Also this help (because you swore)";
         exit 0;
@@ -407,6 +478,11 @@ sub main {
 
     if ($show_status) {
         print_status();
+        exit 0;
+    }
+
+    if ($smoke_forensic) {
+        run_forensic_smoke();
         exit 0;
     }
 
