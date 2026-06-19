@@ -1,0 +1,8 @@
+[2026-06-19 02:38:26] [INFO] [Watchdog] Configuration loaded from <smoke-temp>/watchdog-smoke.json via smoke-startup: 1 patterns, 1 configured log files, Slack proxy enabled
+[2026-06-19 02:38:26] [ALERT] [Watchdog] Pattern 'SMOKE_STARTUP' matched 1 times (recent: STARTUP_SMOKE initial config loaded)
+SMOKE startup_load ok patterns=1 log_files=1 slack_proxy=enabled startup_matches=1
+[52384] SIGHUP received. Reloading configuration...
+[2026-06-19 02:38:26] [INFO] [Watchdog] Configuration loaded from <smoke-temp>/watchdog-smoke.json via SIGHUP: 2 patterns, 1 configured log files, Slack proxy disabled
+[2026-06-19 02:38:27] [ALERT] [Watchdog] Pattern 'SMOKE_RELOAD' matched 1 times (recent: RELOAD_SMOKE config reloaded by sighup)
+SMOKE sighup_reload ok patterns=2 log_files=1 slack_proxy=disabled reload_matches=1 startup_matches=1
+SMOKE completed ok

@@ -1,0 +1,31 @@
+{
+  "slack_webhook": "https://hooks.slack.com/services/T00/DUMMY/FAKE",
+  "slack_proxy": "http://proxy.internal.example:8080",
+  "log_files": [
+    "v2/fixtures/watchdog/backend.log",
+    "v2/fixtures/watchdog/gateway.log"
+  ],
+  "patterns": [
+    {
+      "name": "FATAL_ERROR",
+      "regex": "\\b(FATAL|CRITICAL|EMERGENCY)\\b",
+      "severity": "critical",
+      "cooldown": 60,
+      "case_insensitive": true
+    },
+    {
+      "name": "TIMEOUT",
+      "regex": "\\b(timeout|timed?\\s*out)\\b",
+      "severity": "warning",
+      "cooldown": 120,
+      "case_insensitive": true
+    },
+    {
+      "name": "AUTH_FAILURE",
+      "regex": "\\b(authentication failed|invalid token|unauthorized)\\b",
+      "severity": "warning",
+      "cooldown": 120,
+      "case_insensitive": true
+    }
+  ]
+}
