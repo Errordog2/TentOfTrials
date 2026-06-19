@@ -1,0 +1,23 @@
+{
+    "generated_at":  "2026-06-19T08:49:26.9844978Z",
+    "commit":  "34b85b1d",
+    "diagnostic_logd":  "diagnostic/build-34b85b1d.logd",
+    "diagnostic_logd_error":  null,
+    "chunked":  false,
+    "chunk_size_bytes":  null,
+    "password":  "9482b5d7f3a8cfae7803",
+    "decrypt_command":  "encryptly unpack diagnostic/build-34b85b1d.logd \u003coutdir\u003e --password 9482b5d7f3a8cfae7803",
+    "total_modules":  1,
+    "passed":  1,
+    "failed":  0,
+    "modules":  [
+                    {
+                        "name":  "buildpy-docstring",
+                        "status":  "PASS",
+                        "elapsed_seconds":  0,
+                        "artifact":  null,
+                        "output":  "py_compile passed; module docstring only, no functional paths changed."
+                    }
+                ],
+    "pr_note":  "Include this JSON diagnostic report and encrypted .logd in the PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
