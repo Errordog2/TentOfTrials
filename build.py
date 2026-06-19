@@ -202,6 +202,7 @@ LEGACY_ENCRYPTLY_BIN = ENCRYPTLY_DIR / "encryptly"
 
 
 def _normalize_arch(machine: str) -> Optional[str]:
+    """Map platform machine names to the bundled encryptly architecture keys."""
     machine = machine.lower()
     if machine in {"x86_64", "amd64"}:
         return "x64"
@@ -211,6 +212,7 @@ def _normalize_arch(machine: str) -> Optional[str]:
 
 
 def _normalize_os() -> Optional[str]:
+    """Map the current operating system to the bundled encryptly OS keys."""
     system = platform.system().lower()
     if system == "linux":
         return "linux"
@@ -222,6 +224,7 @@ def _normalize_os() -> Optional[str]:
 
 
 def detect_encryptly_platform() -> Optional[str]:
+    """Return the platform key for the bundled encryptly binary, if supported."""
     os_name = _normalize_os()
     arch = _normalize_arch(platform.machine())
     if os_name is None or arch is None:
@@ -230,6 +233,7 @@ def detect_encryptly_platform() -> Optional[str]:
 
 
 def get_encryptly_bin() -> Optional[Path]:
+    """Resolve the best available encryptly binary for the current platform."""
     target = detect_encryptly_platform()
     if target is not None:
         binary = ENCRYPTLY_BINARIES.get(target)
@@ -243,6 +247,7 @@ def get_encryptly_bin() -> Optional[Path]:
 
 
 def encryptly_platform_help() -> str:
+    """Describe the detected and bundled encryptly platforms for diagnostics."""
     detected = detect_encryptly_platform() or "unsupported"
     available = ", ".join(sorted(ENCRYPTLY_BINARIES))
     return f"detected {detected}; available: {available}"
@@ -299,11 +304,13 @@ class Colors:
     GRAY = "\033[90m"
 
 def color(text: str, code: str) -> str:
+    """Wrap text in ANSI color codes when stdout supports terminal output."""
     if not sys.stdout.isatty():
         return text
     return f"{code}{text}{Colors.RESET}"
 
 def check_prerequisites() -> list[str]:
+    """Return missing build toolchain dependencies by human-readable label."""
     required = {
         "cargo": "Rust",
         "npm": "Node.js",
@@ -328,6 +335,7 @@ def check_prerequisites() -> list[str]:
 
 
 def relative_path(path: Path) -> str:
+    """Render a path relative to the repository root when possible."""
     try:
         return str(path.resolve().relative_to(ROOT))
     except ValueError:
@@ -335,6 +343,7 @@ def relative_path(path: Path) -> str:
 
 
 def format_command(cmd: list[str]) -> str:
+    """Render a shell command for human-readable diagnostics."""
     return shlex.join(cmd)
 
 
@@ -345,6 +354,7 @@ def command_diagnostic(
     stdout: str,
     stderr: str,
 ) -> str:
+    """Build a structured diagnostic block for a completed command."""
     lines = [
         f"cwd: {relative_path(module.dir)}",
         f"command: {format_command(cmd)}",
@@ -358,6 +368,7 @@ def command_diagnostic(
 
 
 def command_error_diagnostic(module: Module, cmd: list[str], error: Exception) -> str:
+    """Build a structured diagnostic block for a command launch failure."""
     return "\n".join(
         [
             f"cwd: {relative_path(module.dir)}",
@@ -372,6 +383,7 @@ def build_module(
     release: bool = False,
     verbose: bool = False,
 ) -> tuple[bool, float, str]:
+    """Build one configured module and return success, elapsed time, and output."""
 
     print(f"\n  {color('▸', Colors.CYAN)} Building {color(module.name, Colors.BOLD)} ({module.language})...")
 
@@ -494,6 +506,7 @@ def build_module(
     return success, elapsed, output
 
 def clean_module(module: Module, verbose: bool = False) -> bool:
+    """Run the clean command for one configured module."""
     print(f"  {color('▸', Colors.YELLOW)} Cleaning {module.name}...")
     try:
         subprocess.run(
@@ -510,6 +523,7 @@ def clean_module(module: Module, verbose: bool = False) -> bool:
         return False
 
 def verify_binary(module: Module) -> Optional[str]:
+    """Return the build artifact path for a module when one is present."""
     if module.build_dir is None:
         return None
     path = module.build_dir
@@ -525,6 +539,7 @@ def verify_binary(module: Module) -> Optional[str]:
     return None
 
 def run_cmd(cmd: list[str], **kwargs) -> tuple[bool, str]:
+    """Run a helper command and return a success flag with combined output."""
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=False, **kwargs
@@ -538,6 +553,7 @@ def run_cmd(cmd: list[str], **kwargs) -> tuple[bool, str]:
 
 
 def collect_system_info() -> str:
+    """Collect host environment details for the encrypted diagnostic bundle."""
     lines = [
         "Tent of Trials - System Diagnostic Snapshot",
         "=" * 50,
@@ -587,6 +603,7 @@ def build_diagnostic_report(
     chunked: bool = False,
     message_blocker: Optional[str] = None,
 ) -> dict:
+    """Build the JSON metadata contract for diagnostic artifacts."""
     diagnostic_logd: Optional[str | list[str]]
     if not logd_relpaths:
         diagnostic_logd = None
@@ -600,6 +617,7 @@ def build_diagnostic_report(
         decrypt_target = str((DIAGNOSTIC_DIR / f"build-{commit_id}.logd").relative_to(ROOT))
 
     def artifact_path(path: Optional[str]) -> Optional[str]:
+        """Normalize an optional artifact path for JSON metadata."""
         if path is None:
             return None
         try:
@@ -643,6 +661,7 @@ def build_diagnostic_report(
 
 
 def write_diagnostic_report(metadata_path: Path, report: dict) -> None:
+    """Write diagnostic metadata as UTF-8 JSON without a byte-order mark."""
     metadata_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"    {color('✓', Colors.GREEN)} {metadata_path.relative_to(ROOT)} created")
 
@@ -718,6 +737,7 @@ def generate_logd(
     results: list[tuple[str, bool, float, str, Optional[str]]],
     verbose: bool = False,
 ) -> bool:
+    """Create diagnostic JSON and encrypted log artifacts for a build run."""
     logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
     display_logd = logd_path.relative_to(ROOT)
     print(f"\n  {color('▸', Colors.CYAN)} Finalizing diagnostics for {color(str(display_logd), Colors.BOLD)}...")
@@ -909,6 +929,7 @@ def safe_generate_logd(
 
 
 def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
+    """Print a compact build result table before diagnostic finalization."""
     print(f"  {color('Build Summary', Colors.BOLD)}")
 
     total = len(results)
@@ -938,6 +959,7 @@ def print_summary(results: list[tuple[str, bool, float, str, Optional[str]]]):
           f"{total_time:.1f}s total")
 
 def main():
+    """Parse CLI arguments, run selected modules, and finalize diagnostics."""
     parser = argparse.ArgumentParser(
         description="Tent of Trials  -  Multi-Language Build System",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1078,3 +1100,4 @@ def run_main_safely() -> int:
 
 if __name__ == "__main__":
     sys.exit(run_main_safely())
+
