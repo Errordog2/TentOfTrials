@@ -86,6 +86,8 @@ my $verbose     = 0;
 my $daemon_mode = 0;
 my $config_file = DEFAULT_CONFIG;
 my $forensic_file = $ENV{WATCHDOG_FORENSIC_FILE} // FORENSIC_FILE;
+my $slack_webhook = $ENV{WATCHDOG_SLACK_WEBHOOK} // SLACK_WEBHOOK;
+my $slack_proxy = $ENV{WATCHDOG_SLACK_PROXY};
 my $alert_count = 0;
 my %error_counts = ();
 my %last_alert_time = ();
@@ -126,10 +128,7 @@ $SIG{TERM} = \&handle_signal;
 $SIG{INT}  = \&handle_signal;
 $SIG{HUP}  = sub {
     say "[$$] SIGHUP received. Reloading configuration...";
-    # TODO: Actually reload config. Currently this is a no-op.
-    # The config reload logic was supposed to be implemented in
-    # the v2 release but it was cut due to scope creep. The ticket
-    # is V2-119. It's been in the backlog for 6 months.
+    reload_config();
 };
 
 # ===─ Utility Functions =================================================================================
@@ -138,6 +137,137 @@ sub log_msg {
     my ($level, $msg) = @_;
     my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
     say "[$ts] [$level] [Watchdog] $msg";
+}
+
+sub pattern_from_config {
+    my ($item) = @_;
+    die "pattern entry must be an object" unless ref($item) eq 'HASH';
+
+    for my $key (qw(name regex severity cooldown)) {
+        die "pattern missing $key" unless exists $item->{$key};
+    }
+
+    my $compiled = eval { qr/$item->{regex}/ };
+    die "invalid regex for pattern $item->{name}: $@" if $@;
+
+    return {
+        name     => "$item->{name}",
+        regex    => $compiled,
+        severity => "$item->{severity}",
+        cooldown => int($item->{cooldown}),
+    };
+}
+
+sub apply_config {
+    my ($config) = @_;
+    die "config must be an object" unless ref($config) eq 'HASH';
+
+    $slack_webhook = "$config->{slack_webhook}" if exists $config->{slack_webhook};
+    if (exists $config->{slack_proxy}) {
+        $slack_proxy = defined $config->{slack_proxy} && $config->{slack_proxy} ne ''
+            ? "$config->{slack_proxy}"
+            : undef;
+    }
+    $forensic_file = "$config->{forensic_file}" if exists $config->{forensic_file};
+
+    if (exists $config->{patterns}) {
+        die "patterns must be an array" unless ref($config->{patterns}) eq 'ARRAY';
+        my @loaded = map { pattern_from_config($_) } @{$config->{patterns}};
+        die "patterns must not be empty" unless @loaded;
+        @patterns = @loaded;
+        %last_alert_time = ();
+    }
+}
+
+sub load_config_file {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or die "open $path: $!";
+    local $/;
+    my $body = <$fh>;
+    close($fh);
+    my $config = parse_config_body($body, $path);
+    apply_config($config);
+}
+
+sub parse_config_body {
+    my ($body, $path) = @_;
+    return decode_json($body) if $body =~ /^\s*[\{\[]/;
+    return parse_simple_yaml_config($body, $path);
+}
+
+sub strip_yaml_quotes {
+    my ($value) = @_;
+    $value =~ s/^\s+|\s+$//g;
+    return undef if $value eq '' || $value eq 'null' || $value eq '~';
+    if ($value =~ /^"(.*)"$/s || $value =~ /^'(.*)'$/s) {
+        return $1;
+    }
+    return $value;
+}
+
+sub parse_yaml_scalar {
+    my ($value) = @_;
+    $value =~ s/\s+#.*$//;
+    return strip_yaml_quotes($value);
+}
+
+sub parse_simple_yaml_config {
+    my ($body, $path) = @_;
+    my %config;
+    my @loaded_patterns;
+    my $current_pattern;
+    my $in_patterns = 0;
+
+    for my $raw_line (split /\n/, $body) {
+        $raw_line =~ s/\r$//;
+        next if $raw_line =~ /^\s*(?:#.*)?$/;
+
+        if ($raw_line =~ /^patterns:\s*$/) {
+            $in_patterns = 1;
+            next;
+        }
+
+        if (!$in_patterns && $raw_line =~ /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            $config{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        if ($in_patterns && $raw_line =~ /^\s*-\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            push @loaded_patterns, $current_pattern if defined $current_pattern;
+            $current_pattern = {};
+            $current_pattern->{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        if ($in_patterns && $raw_line =~ /^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/) {
+            die "pattern property before pattern entry in $path" unless defined $current_pattern;
+            $current_pattern->{$1} = parse_yaml_scalar($2);
+            next;
+        }
+
+        die "unsupported config syntax in $path: $raw_line";
+    }
+
+    push @loaded_patterns, $current_pattern if defined $current_pattern;
+    $config{patterns} = \@loaded_patterns if @loaded_patterns;
+    return \%config;
+}
+
+sub reload_config {
+    if (!defined $config_file || $config_file eq '' || !-f $config_file) {
+        log_msg('WARN', "Config file not found, keeping current settings: $config_file");
+        return 0;
+    }
+
+    eval { load_config_file($config_file); 1 } or do {
+        my $err = $@ || 'unknown error';
+        chomp $err;
+        log_msg('ERROR', "Config reload failed for $config_file: $err");
+        return 0;
+    };
+
+    log_msg('INFO', "Config reloaded from $config_file");
+    return 1;
 }
 
 sub safe_json_line {
@@ -198,7 +328,9 @@ sub slack_alert {
     # times out. For a monitoring daemon. In production.
     # In v2, we set a 5-second timeout. That's still too long for a
     # monitoring daemon, but it's better than fucking infinite.
-    my $http = HTTP::Tiny->new(timeout => 5);
+    my %http_args = (timeout => 5);
+    $http_args{proxy} = $slack_proxy if defined $slack_proxy && $slack_proxy ne '';
+    my $http = HTTP::Tiny->new(%http_args);
     my $payload = encode_json({ text => $message, mrkdwn => JSON::PP::true });
 
     # TODO: The Slack webhook call bypasses the proxy. If the monitoring
@@ -206,7 +338,7 @@ sub slack_alert {
     # The proxy configuration was supposed to be in the config file but
     # the config file parsing is also not fully implemented. See V2-119.
     eval {
-        my $response = $http->post(SLACK_WEBHOOK, {
+        my $response = $http->post($slack_webhook, {
             content => $payload,
             headers => { 'Content-Type' => 'application/json' },
         });
@@ -390,6 +522,8 @@ sub print_status {
     say "PID: $$";
     say "Alerts sent: $alert_count";
     say "Forensic file: $forensic_file";
+    say "Slack webhook: " . ($slack_webhook eq SLACK_WEBHOOK ? "(default)" : "(configured)");
+    say "Slack proxy: " . (defined $slack_proxy ? $slack_proxy : "(none)");
     say "";
     say "Pattern match counts:";
     foreach my $name (sort keys %error_counts) {
@@ -429,6 +563,55 @@ sub run_forensic_smoke {
     say encode_json({ status => 'ok', forensic_write => JSON::PP::true, failure_graceful => JSON::PP::true });
 }
 
+sub run_config_reload_smoke {
+    my $tmp = "/tmp/v2-watchdog-config-smoke-$$.json";
+    my $original_config_file = $config_file;
+    my $original_forensic_file = $forensic_file;
+    my $original_slack_webhook = $slack_webhook;
+    my $original_slack_proxy = $slack_proxy;
+    my @original_patterns = @patterns;
+
+    my $config = {
+        slack_webhook => 'https://hooks.slack.com/services/T00/RELOAD/TEST',
+        slack_proxy => 'http://127.0.0.1:8080',
+        forensic_file => "/tmp/v2-watchdog-reloaded-$$.jsonl",
+        patterns => [
+            {
+                name => 'SMOKE_FATAL',
+                regex => '\\bSMOKE_FATAL\\b',
+                severity => 'critical',
+                cooldown => 7,
+            },
+        ],
+    };
+
+    eval {
+        open(my $fh, '>', $tmp) or die "open $tmp: $!";
+        print {$fh} encode_json($config);
+        close($fh);
+
+        $config_file = $tmp;
+        die "expected reload_config to succeed" unless reload_config();
+        die "slack webhook did not reload" unless $slack_webhook eq $config->{slack_webhook};
+        die "slack proxy did not reload" unless defined $slack_proxy && $slack_proxy eq $config->{slack_proxy};
+        die "forensic file did not reload" unless $forensic_file eq $config->{forensic_file};
+        die "patterns did not reload" unless @patterns == 1 && $patterns[0]->{name} eq 'SMOKE_FATAL';
+        die "cooldown did not reload" unless $patterns[0]->{cooldown} == 7;
+    };
+    my $err = $@;
+    my $loaded_pattern_count = scalar(@patterns);
+
+    unlink $tmp if -e $tmp;
+    $config_file = $original_config_file;
+    $forensic_file = $original_forensic_file;
+    $slack_webhook = $original_slack_webhook;
+    $slack_proxy = $original_slack_proxy;
+    @patterns = @original_patterns;
+    die $err if $err;
+
+    say encode_json({ status => 'ok', reload => JSON::PP::true, loaded_patterns => $loaded_pattern_count });
+}
+
 # ===─ Main ===================================================================================================─
 
 sub main {
@@ -451,6 +634,7 @@ sub main {
         'test-alert|t'  => \my $test_alert,
         'status|s'      => \my $show_status,
         'smoke-forensic' => \my $smoke_forensic,
+        'smoke-config-reload' => \my $smoke_config_reload,
         'help|h'        => \my $show_help,
         'fucking-help'  => \my $fucking_help,
     ) or die "Usage: $0 [options]\nTry --fucking-help if you're confused.\n";
@@ -466,9 +650,16 @@ sub main {
         say "  -t, --test-alert     Send test alert to Slack";
         say "  -s, --status         Show daemon status";
         say "  --smoke-forensic     Validate overlong-line forensic capture";
+        say "  --smoke-config-reload Validate config load/reload behavior";
         say "  -h, --help           Show this help";
         say "  --fucking-help       Also this help (because you swore)";
         exit 0;
+    }
+
+    if (-f $config_file) {
+        reload_config();
+    } else {
+        log_msg('WARN', "Config file not found at startup, using defaults: $config_file") if $verbose;
     }
 
     if ($test_alert) {
@@ -483,6 +674,11 @@ sub main {
 
     if ($smoke_forensic) {
         run_forensic_smoke();
+        exit 0;
+    }
+
+    if ($smoke_config_reload) {
+        run_config_reload_smoke();
         exit 0;
     }
 
