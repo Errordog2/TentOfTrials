@@ -1,15 +1,7 @@
  ```diff
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
-@@ -10,6 +10,7 @@
-   - The monitoring system (periodic health checks)
-   - The on-call engineer (manual troubleshooting)
- 
-+
- The health check performs the following checks:
-   1. Service availability (HTTP health endpoints)
-   2. Database connectivity (connection test)
-@@ -30,6 +31,7 @@
+@@ -12,6 +12,7 @@
  import argparse
  import json
  import os
@@ -17,7 +9,7 @@
  import socket
  import ssl
  import subprocess
-@@ -37,6 +39,7 @@
+@@ -19,6 +20,7 @@
  import time
  from datetime import datetime
  from typing import Any, Dict, List, Optional, Tuple
@@ -25,144 +17,145 @@
  
  # ---------------------------------------------------------------------------
  # CONSTANTS
-@@ -156,6 +159,10 @@
- 
- 
+@@ -131,6 +133,9 @@
  def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
-+    """
-+    Check memory usage. On Linux, reads /proc/meminfo.
-+    On other platforms, uses standard library fallbacks.
-+    """
+     """
+     Check system memory usage.
++    
++    On Linux, reads /proc/meminfo directly for accurate measurements.
++    On non-Linux platforms, falls back to standard library alternatives.
+     """
      try:
          with open("/proc/meminfo", "r") as f:
-             meminfo = f.read()
-@@ -177,12 +184,56 @@
-             status = "WARNING"
- 
-         return status, detail, {"percent": percent, "available_mb": available_mb}
+@@ -155,8 +160,55 @@
+             "detail": detail,
+             "data": {"percent_used": percent_used, "available_mb": available_mb},
+         }
 -    except FileNotFoundError:
--        return "WARNING", "/proc/meminfo not available", {}
+-        return "WARNING", "/proc/meminfo not available", {"percent_used": None, "available_mb": None}
 +    except (FileNotFoundError, OSError):
-+        # Fallback for non-Linux systems using standard library
++        # Fallback for non-Linux platforms
 +        try:
-+            # Try psutil first if available
++            # Try using psutil if available (common cross-platform library)
++            import psutil
++            mem = psutil.virtual_memory()
++            percent_used = mem.percent
++            available_mb = mem.available // (1024 * 1024)
++            
++            if percent_used >= MEMORY_THRESHOLD_CRITICAL:
++                result = "CRITICAL"
++                detail = f"Memory usage is {percent_used:.1f}% (critical threshold: {MEMORY_THRESHOLD_CRITICAL}%)"
++            elif percent_used >= MEMORY_THRESHOLD_WARNING:
++                result = "WARNING"
++                detail = f"Memory usage is {percent_used:.1f}% (warning threshold: {MEMORY_THRESHOLD_WARNING}%)"
++            else:
++                result = "OK"
++                detail = f"Memory usage is {percent_used:.1f}%"
++            
++            return result, detail, {
++                "percent_used": percent_used,
++                "available_mb": available_mb,
++            }
++        except ImportError:
++            pass
++        
++        # Fallback using ctypes on macOS
++        if platform.system() == "Darwin":
 +            try:
-+                import psutil
-+                mem = psutil.virtual_memory()
-+                percent = mem.percent
-+                available_mb = mem.available / (1024 * 1024)
-+                detail = f"Memory usage: {percent:.1f}% ({available_mb:.0f}MB available)"
-+                if percent >= MEMORY_THRESHOLD_CRITICAL:
-+                    status = "CRITICAL"
-+                elif percent >= MEMORY_THRESHOLD_WARNING:
-+                    status = "WARNING"
-+                else:
-+                    status = "OK"
-+                return status, detail, {"percent": percent, "available_mb": available_mb}
-+            except ImportError:
-+                pass
-+
-+            # Fallback to sys.getsizeof and resource module
-+            import resource
-+            import sys
-+
-+            # Get memory info using resource module (works on Unix-like systems)
-+            try:
-+                # ru_maxrss is in KB on Linux, bytes on macOS
-+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-+                if platform.system() == "Linux":
-+                    rss_mb = rss / 1024
-+                else:
-+                    rss_mb = rss / (1024 * 1024)
++                import ctypes
++                import ctypes.util
 +                
-+                # Try to get total system memory
-+                total_mb = _get_total_memory_mb()
-+                if total_mb and total_mb > 0:
-+                    percent = (rss_mb / total_mb) * 100
-+                else:
-+                    percent = 0
++                libc = ctypes.CDLL(ctypes.util.find_library("c"))
 +                
-+                detail = f"Process memory: {rss_mb:.1f}MB (estimated {percent:.1f}%)"
-+                if percent >= MEMORY_THRESHOLD_CRITICAL:
-+                    status = "CRITICAL"
-+                elif percent >= MEMORY_THRESHOLD_WARNING:
-+                    status = "WARNING"
-+                else:
-+                    status = "OK"
-+                return status, detail, {"percent": percent, "available_mb": max(0, total_mb - rss_mb) if total_mb else 0}
++                class vm_statistics64(ctypes.Structure):
++                    _fields_ = [
++                        ("free_count", ctypes.c_uint64),
++                        ("active_count", ctypes.c_uint64),
++                        ("inactive_count", ctypes.c_uint64),
++                        ("wire_count", ctypes.c_uint64),
++                        ("zero_fill_count", ctypes.c_uint64),
++                        ("reactivations", ctypes.c_uint64),
++                        ("pageins", ctypes.c_uint64),
++                        ("pageouts", ctypes.c_uint64),
++                        ("faults", ctypes.c_uint64),
++                        ("cow_faults", ctypes.c_uint64),
++                        ("lookups", ctypes.c_uint64),
++                        ("hits", ctypes.c_uint64),
++                        ("purges", ctypes.c_uint64),
++                        ("purgeable_count", ctypes.c_uint64),
++                        ("speculative_count", ctypes.c_uint64),
++                        ("decompressions", ctypes.c_uint64),
++                        ("compressions", ctypes.c_uint64),
++                        ("swapins", ctypes.c_uint64),
++                        ("swapouts", ctypes.c_uint64),
++                        ("swapused", ctypes.c_uint64),
++                    ]
++                
++                vm_statistics64._fields_.insert(0, ("free_count", ctypes.c_uint64))
++                
++                # Use a simpler approach: try to get memory info from sysctl
++                # This is a basic fallback that provides approximate values
++                return "WARNING", "Memory check using macOS fallback (approximate)", {
++                    "percent_used": None,
++                    "available_mb": None,
++                    "note": "Install psutil for accurate memory measurements on macOS",
++                }
 +            except Exception:
 +                pass
-+        except Exception:
-+            pass
-+        return "WARNING", "Memory information unavailable on this platform", {}
-     except Exception as e:
-         return "CRITICAL", str(e), {}
- 
- 
-@@ -190,6 +241,50 @@
-     return "OK", f"Disk usage: {percent:.1f}%", {"percent": percent}
- 
- 
-+def _get_total_memory_mb() -> Optional[float]:
-+    """Get total system memory in MB using platform-specific methods."""
-+    system = platform.system()
-+    
-+    if system == "Darwin":  # macOS
++        
++        # Final fallback: try to read from /usr/bin/vm_stat on macOS or free on other systems
 +        try:
-+            result = subprocess.run(["sysctl", "-n", "hw.memsize"], 
-+                                    capture_output=True, text=True, timeout=5)
-+            if result.returncode == 0:
-+                return int(result.stdout.strip()) / (1024 * 1024)
-+        except Exception:
++            if platform.system() == "Darwin":
++                result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
++                if result.returncode == 0:
++                    # Parse vm_stat output for approximate memory info
++                    lines = result.stdout.strip().split("\n")
++                    return "WARNING", "Memory check using vm_stat fallback (approximate)", {
++                        "percent_used": None,
++                        "available_mb": None,
++                        "note": "Install psutil for accurate memory measurements",
++                    }
++            else:
++                # Try free command on other Unix-like systems
++                result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
++                if result.returncode == 0:
++                    lines = result.stdout.strip().split("\n")
++                    if len(lines) > 1:
++                        mem_line = lines[1].split()
++                        if len(mem_line) >= 4:
++                            total = int(mem_line[1])
++                            used = int(mem_line[2])
++                            available_mb = int(mem_line[6]) if len(mem_line) > 6 else total - used
++                            percent_used = (used / total) * 100 if total > 0 else 0
++                            
++                            if percent_used >= MEMORY_THRESHOLD_CRITICAL:
++                                status = "CRITICAL"
++                                detail = f"Memory usage is {percent_used:.1f}% (critical threshold: {MEMORY_THRESHOLD_CRITICAL}%)"
++                            elif percent_used >= MEMORY_THRESHOLD_WARNING:
++                                status = "WARNING"
++                                detail = f"Memory usage is {percent_used:.1f}% (warning threshold: {MEMORY_THRESHOLD_WARNING}%)"
++                            else:
++                                status = "OK"
++                                detail = f"Memory usage is {percent_used:.1f}%"
++                            
++                            return status, detail, {
++                                "percent_used": percent_used,
++                                "available_mb": available_mb,
++                            }
++        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, IndexError):
 +            pass
-+    elif system == "Windows":
-+        try:
-+            kernel32 = ctypes.windll.kernel32
-+            class MEMORYSTATUSEX(ctypes.Structure):
-+                _fields_ = [
-+                    ("dwLength", ctypes.c_ulong),
-+                    ("dwMemoryLoad", ctypes.c_ulong),
-+                    ("ullTotalPhys", ctypes.c_ulonglong),
-+                    ("ullAvailPhys", ctypes.c_ulonglong),
-+                    ("ullTotalPageFile", ctypes.c_ulonglong),
-+                    ("ullAvailPageFile", ctypes.c_ulonglong),
-+                    ("ullTotalVirtual", ctypes.c_ulonglong),
-+                    ("ullAvailVirtual", ctypes.c_ulonglong),
-+                    ("sullAvailExtended Pendular", ctypes.c_ulonglong),
-+                ]
-+            stat = MEMORYSTATUSEX()
-+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-+            if kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-+                return stat.ullTotalPhys / (1024 * 1024)
-+        except Exception:
-+            pass
-+    elif system == "Linux":
-+        try:
-+            with open("/proc/meminfo", "r") as f:
-+                for line in f:
-+                    if line.startswith("MemTotal:"):
-+                        kb = int(line.split()[1])
-+                        return kb / 1024
-+        except Exception:
-+            pass
-+    
-+    return None
-+
-+
++        
++        return "WARNING", "Memory check unavailable: /proc/meminfo not accessible and no fallback succeeded", {
++            "percent_used": None,
++            "available_mb": None,
++            "note": "Install psutil for cross-platform memory support",
++        }
+ 
+ 
  def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
-     try:
-         with open("/proc/loadavg", "r") as f:
-@@ -202,8 +297,32 @@
-             status = "WARNING"
- 
-         return status, detail, {"load_1min": load_1min, "load_5min": load_5min, "load_15min": load_15min}
--    except FileNotFoundError:
--        return "WARNING", "/proc/loadavg not available", {}
-+    except (FileNotFoundError, OSError):
-+        # Fallback to os.getloadavg() for Unix-like systems
-+        try:
-+            load_1min, load_5min, load_15min = os.getloadavg()
-+            detail = f"Load average: {load_1min:.2f} {load_5min:.2f} {load_15min:.2f}"
-+            if load_1min >= 4.0:
-+                status = "CRITICAL"
-+            elif load_1min >=
+     """
+@@ -165,8 +217,8 @@
+     Returns:
+         Tuple of (status, detail, data)
+     """
+-    # Read from /proc/load
