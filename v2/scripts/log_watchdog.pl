@@ -12,35 +12,31 @@
 # want to feel something. It's also what you use when you want your code
 # to be unreadable by anyone who wasn't there in the 90s. Perl is the
 # Latin of programming languages  -  dead but still showing up in places
-use strict;
-use warnings;
-use POSIX qw(strftime);
-use File::Basename qw(dirname);
-use File::Path qw(make_path);
+use constant MAX_LINE_LEN      => 4096;
+use constant ALERT_COOLDOWN    => 300;    # seconds
+use constant STATE_FILE        => '/var/run/log_watchdog.state';
+use constant FORENSIC_DIR      => '/var/log/watchdog_forensic';
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Globals
 #   4. Rotates log files when they get too big
 #   5. Crashes occasionally for no fucking reason
 #
-use constant MAX_LINE_LEN      => 4096;
-use constant ALERT_COOLDOWN    => 60;   # seconds between identical alerts
-use constant WATCH_PATTERN     => qr/(?i)ERROR|CRITICAL|FATAL/;
-use constant FORENSIC_DIR      => '/var/log/watchdog/forensic';
-use constant FORENSIC_FILE     => '/var/log/watchdog/forensic/overlong.lines';
-use constant FORENSIC_MAX_MB   => 100;  # max forensic file size in MB
+my %last_alert;        # pattern => epoch
+my $state_fh;
+my $state_dirty = 0;
+my $forensic_fh;       # handle for overlong line forensic log
 
-# ---------------------------------------------------------------------------
-# State
+# Pre-compiled patterns: list of [name, qr//, severity]
+my @PATTERNS = (
 # TODO: The Slack webhook URL is hardcoded below. This is fine for now
 # because it's a development-only deployment. The production deployment
-my %last_alert_time;   # pattern => epoch
-my $total_lines      = 0;
-my $truncated_count  = 0;
-my $forensic_path    = $ENV{WATCHDOG_FORENSIC_PATH} // FORENSIC_FILE;
-
-# ---------------------------------------------------------------------------
-# Helpers
+# uses a different URL that's stored in Vault. The Vault read logic was
+# implemented but never tested because the Vault server was down during
+# the sprint when we wrote it. We wrote a TODO to test it later. That
+# was 4 months ago. The production Slack webhook is still the hardcoded
+# one. The alerts go to #ops-alerts-test which nobody monitors.
+#
 # Usage:
 #   ./log_watchdog.pl --config config.yaml
 #   ./log_watchdog.pl --daemon
@@ -53,81 +49,30 @@ use v5.32;
 
 use Cwd 'abs_path';
 use Data::Dumper;
-    return strftime('%Y-%m-%dT%H:%M:%S%z', localtime);
-}
+use File::Tail;
+use Getopt::Long;
+use HTTP::Tiny;
+use IO::Socket::INET;
+use JSON::PP;
+use MIME::Base64;
+sub load_state;
+sub save_state;
+sub rotate_state;
+sub init_forensic;
 
-sub ensure_forensic_dir {
-    my $dir = dirname($forensic_path);
-    if (! -d $dir) {
-        eval {
-            make_path($dir, { mode => 0750, error => \my $err });
-            if (@$err) {
-                warn "Failed to create forensic directory $dir: " . join(", ", map { $_->{error} } @$err);
-                return 0;
-            }
-        };
-        if ($@) {
-            warn "Failed to create forensic directory $dir: $@";
-            return 0;
-        }
-    }
-    return 1;
-}
-
-sub write_forensic {
-    my ($line, $source, $orig_len) = @_;
-    
-    eval {
-        # Check file size limit
-        if (-f $forensic_path) {
-            my $size_mb = (-s $forensic_path) / (1024 * 1024);
-            return if $size_mb >= FORENSIC_MAX_MB;
-        }
-        
-        # Ensure directory exists
-        return unless ensure_forensic_dir();
-        
-        # Open in append mode
-        open(my $fh, '>>:encoding(UTF-8)', $forensic_path) or do {
-            warn "Cannot open forensic file $forensic_path: $!";
-            return;
-        };
-        
-        # Build metadata and preview
-        my $ts = iso_timestamp();
-        my $preview = substr($line, 0, 200);
-        $preview =~ s/\n/\\n/g;
-        $preview =~ s/\r/\\r/g;
-        
-        # Write structured record
-        print $fh "[$ts] source=$source orig_len=$orig_len preview=$preview\n";
-        
-        close($fh) or warn "Cannot close forensic file: $!";
-    };
-    if ($@) {
-        warn "Forensic write failed: $@";
-    }
-}
-
-sub load_state {
-    return unless -f STATE_FILE;
-    open(my $fh, '<', STATE_FILE) or return;
-use POSIX qw(strftime);
-use Time::HiRes qw(usleep);
-
-# ===─ Fucking Constants =================================================================================─
-
-use constant {
+# ---------------------------------------------------------------------------
+# Main
     VERSION        => '2.0.0',
     DAEMON_NAME    => 'v2-log-watchdog',
     DEFAULT_CONFIG => '/etc/tent/watchdog.yaml',
     SLACK_WEBHOOK  => 'https://hooks.slack.com/services/T00/DUMMY/FAKE',  # TODO: Read from Vault
-    HEARTBEAT_FILE => '/tmp/v2-watchdog-heartbeat',
-    PID_FILE       => '/tmp/v2-watchdog.pid',
-    MAX_LINE_LEN   => 8192,  # lines longer than this get truncated before regex. mostly.
-};
+load_state();
 
-# ===─ Goddamn Global State ==============================================================================
+init_signals();
+init_forensic();
+
+# Tail forever
+my $tail = File::Tail->new(
 
 # In v2, we use lexical variables with `my`. In v1, they used `our` for
 # everything. The v1 global namespace was a goddamn landfill. We found
@@ -151,15 +96,15 @@ my @patterns = (
     { name => 'FATAL_ERROR',        regex => qr/\b(FATAL|CRITICAL|EMERGENCY)\b/i, severity => 'critical', cooldown => 60 },
     { name => 'STACK_TRACE',        regex => qr/\s+at\s+\S+\.\S+\(/,           severity => 'warning',  cooldown => 300 },
     { name => 'OUT_OF_MEMORY',      regex => qr/\b(OutOfMemory|OOM|OoM)\b/i,    severity => 'critical', cooldown => 30 },
-    my ($line, $source) = @_;
-    $total_lines++;
-
-    if (length($line) > MAX_LINE_LEN) {
-        $truncated_count++;
-        write_forensic($line, $source, length($line));
-        return;
-    }
-
+    { name => 'CONNECTION_REFUSED', regex => qr/\b(Connection refused|ECONNREFUSED)\b/i, severity => 'warning', cooldown => 120 },
+    { name => 'TIMEOUT',            regex => qr/\b(timeout|timed?\s*out)\b/i,   severity => 'warning',  cooldown => 120 },
+    { name => 'NULL_POINTER',       regex => qr/\b(NullPointerException|null reference)\b/i, severity => 'error', cooldown => 60 },
+    { name => 'SEGFAULT',           regex => qr/\b(SIGSEGV|segfault|segmentation fault)\b/i, severity => 'critical', cooldown => 10 },
+    { name => 'RATE_LIMIT',         regex => qr/\b(rate limit|too many requests|429)\b/i, severity => 'warning', cooldown => 300 },
+    { name => 'AUTH_FAILURE',       regex => qr/\b(authentication failed|invalid token|unauthorized)\b/i, severity => 'warning', cooldown => 120 },
+    { name => 'DISK_FULL',          regex => qr/\b(No space left|disk full|ENOSPC)\b/i, severity => 'critical', cooldown => 30 },
+    { name => 'FUCK',               regex => qr/\bfuck\b/i,                      severity => 'info',     cooldown => 0 },
+);
 
 # ===─ Signal Handling ====================================================================================─
 
@@ -171,24 +116,58 @@ my @patterns = (
 my $shutdown = 0;
 
 sub handle_signal {
-    my $sig = shift;
-    say "[$$] Received SIG$sig. Shutting down gracefully...";
-    $shutdown = 1;
+    }
 }
 
-$SIG{TERM} = \&handle_signal;
+END { close $forensic_fh if $forensic_fh; }
+exit 0;
+
+# ---------------------------------------------------------------------------
 $SIG{INT}  = \&handle_signal;
 $SIG{HUP}  = sub {
-    say "[$$] SIGHUP received. Reloading configuration...";
-    # TODO: Actually reload config. Currently this is a no-op.
-    # The config reload logic was supposed to be implemented in
-    # the v2 release but it was cut due to scope creep. The ticket
-    # is V2-119. It's been in the backlog for 6 months.
-};
+sub process_line {
+    my ($source, $line) = @_;
 
-# ===─ Utility Functions =================================================================================
+    my $now = time();
 
-sub log_msg {
+    # Guard: overlong lines
+    if (length($line) > MAX_LINE_LEN) {
+        if ($forensic_fh) {
+            my $orig_len = length($line);
+            my $preview  = substr($line, 0, 256);
+            $preview =~ s/"/\\"/g;
+            $preview =~ s/\n/\\n/g;
+            $preview =~ s/\r/\\r/g;
+            my $ts = strftime("%Y-%m-%dT%H:%M:%S%z", localtime($now));
+            my $entry = sprintf(
+                qq({timestamp="%s" source="%s" original_length=%d preview="%s"\n},
+                $ts,
+                $source,
+                $orig_len,
+                $preview
+            );
+            eval {
+                flock($forensic_fh, LOCK_EX);
+                print $forensic_fh $entry;
+                flock($forensic_fh, LOCK_UN);
+            };
+            if ($@) {
+                warn "Forensic write failed: $@";
+            }
+        }
+        # Still truncate for normal processing, but we captured it above
+        $line = substr($line, 0, MAX_LINE_LEN);
+        # Fall through to pattern matching on truncated line to keep
+        # existing alert behavior unchanged for the portion we keep.
+        # However, the issue says "Keep existing pattern matching and
+        # alert behavior unchanged for normal-sized lines."  Overlong
+        # lines were previously dropped entirely; to avoid flooding the
+        # main alert path we skip pattern matching on truncated overlong
+        # lines, matching the old behavior of not alerting on them.
+        return;
+    }
+
+    for my $p (@PATTERNS) {
     my ($level, $msg) = @_;
     my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
     say "[$ts] [$level] [Watchdog] $msg";
@@ -236,13 +215,12 @@ sub slack_alert {
     if ($@) {
         log_msg('ERROR', "Slack alert crashed: $@");
     }
-    print "  total_lines=$total_lines\n";
-    print "  truncated_count=$truncated_count\n";
-    print "  alert_cooldown=" . ALERT_COOLDOWN . "s\n";
-    print "  forensic_path=$forensic_path\n";
 }
 
-# ---------------------------------------------------------------------------
+sub process_line {
+    my ($line, $file) = @_;
+
+    chomp $line;
 
     # Skip lines that are too long
     if (length($line) > MAX_LINE_LEN) {
@@ -252,12 +230,11 @@ sub slack_alert {
         # the relevant log line is >8KB, they'll never see it. That's a
         # problem for future us. Present us doesn't give a shit.
         return;
-    print "  --state-file <path>      Override state file (default: " . STATE_FILE . ")\n";
-    print "  --max-line-len <n>       Override max line length (default: " . MAX_LINE_LEN . ")\n";
-    print "  --alert-cooldown <n>     Override alert cooldown seconds (default: " . ALERT_COOLDOWN . ")\n";
-    print "  --forensic-path <path>   Override forensic output path (default: " . FORENSIC_FILE . ")\n";
-    print "  --help                   Show this help\n";
-}
+    }
+
+    foreach my $pattern (@patterns) {
+        if ($line =~ $pattern->{regex}) {
+            $error_counts{$pattern->{name}}++;
 
             # In v2, we log a summary every 47 matched lines instead of
             # every single match. This prevents alert fatigue. The number
@@ -271,14 +248,12 @@ sub slack_alert {
             }
 
             # Send Slack alert if severity is high enough
-            set_config('MAX_LINE_LEN', shift @ARGV);
-        } elsif ($arg eq '--alert-cooldown') {
-            set_config('ALERT_COOLDOWN', shift @ARGV);
-        } elsif ($arg eq '--forensic-path') {
-            $forensic_path = shift @ARGV;
-        } elsif ($arg eq '--help') {
-            usage(); exit 0;
-        } else {
+            if ($pattern->{severity} ne 'info') {
+                slack_alert($pattern->{name}, $pattern->{severity}, $line, $file);
+            } elsif ($verbose) {
+                log_msg('DEBUG', sprintf("Pattern '%s' matched (info level): %s",
+                    $pattern->{name}, substr($line, 0, 100)));
+            }
         }
     }
 }
@@ -292,16 +267,37 @@ sub watch_files {
         # Default log locations. In v1, these were hardcoded in 4 different
         # places with 4 different lists. We consolidated them into ONE list.
         # Progress.
-        @log_files = qw(
-            /var/log/tent/backend.log
-            /var/log/tent/market.log
-    print "  MAX_LINE_LEN=" . MAX_LINE_LEN . "\n";
-    print "  ALERT_COOLDOWN=" . ALERT_COOLDOWN . "s\n";
-    print "  WATCH_PATTERN=" . WATCH_PATTERN . "\n";
-    print "  FORENSIC_PATH=$forensic_path\n";
+        }
+    }
+}
 
-    # Main loop: read from stdin or files
-    if (@ARGV) {
+# ---------------------------------------------------------------------------
+# Forensic logging
+# ---------------------------------------------------------------------------
+sub init_forensic {
+    eval {
+        unless (-d FORENSIC_DIR) {
+            make_path(FORENSIC_DIR, { mode => 0750 });
+        }
+        my $file = FORENSIC_DIR . '/overlong.log';
+        open($forensic_fh, '>>:encoding(UTF-8)', $file)
+            or die "Cannot open $file: $!";
+        # Ensure autoflush so forensic records are not lost on crash
+        my $oldfh = select($forensic_fh);
+        $| = 1;
+        select($oldfh);
+    };
+    if ($@) {
+        warn "Forensic logging disabled: $@";
+        $forensic_fh = undef;
+    }
+}
+            /var/log/tent/frontend.log
+            /var/log/tent/gateway.log
+            /var/log/tent/compliance.log
+            /var/log/tent/engine.log
+            /var/log/syslog
+        );
     }
 
     log_msg('INFO', "Watching " . scalar(@log_files) . " log files");
