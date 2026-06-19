@@ -114,6 +114,23 @@ Patterns:
   AUTH_FAILURE             warning  cooldown=120
 ```
 
+For review hosts that do not have daemon dependencies such as `File::Tail`,
+run the built-in reload smoke path. It creates a temporary config, loads it,
+rewrites it, sends `SIGHUP` to the current process, and verifies that the
+reloaded pattern set is active:
+
+```bash
+perl v2/scripts/log_watchdog.pl --smoke-reload
+```
+
+Expected output ends with:
+
+```text
+SMOKE startup_load ok patterns=1 log_files=1 slack_proxy=enabled startup_matches=1
+SMOKE sighup_reload ok patterns=2 log_files=1 slack_proxy=disabled reload_matches=1 startup_matches=1
+SMOKE completed ok
+```
+
 On an operations host with `File::Tail` installed, validate the reload path with
 a temporary copy of the config:
 

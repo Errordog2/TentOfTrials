@@ -47,6 +47,7 @@ use v5.32;
 
 use Cwd 'abs_path';
 use Data::Dumper;
+use File::Temp qw(tempdir);
 use Getopt::Long;
 use HTTP::Tiny;
 use IO::Socket::INET;
@@ -563,6 +564,87 @@ sub print_status {
     say "Log files watched: " . (scalar(keys %error_counts) || "unknown");
 }
 
+sub write_smoke_config {
+    my ($path, $payload) = @_;
+    open(my $fh, '>', $path) or die "Cannot write smoke config $path: $!\n";
+    print $fh encode_json($payload);
+    print $fh "\n";
+    close $fh;
+}
+
+sub run_reload_smoke {
+    my $tmp_dir = tempdir(CLEANUP => 1);
+    my $smoke_log = "$tmp_dir/watchdog-smoke.log";
+    my $smoke_config = "$tmp_dir/watchdog-smoke.json";
+
+    open(my $log_fh, '>', $smoke_log) or die "Cannot write smoke log $smoke_log: $!\n";
+    print $log_fh "startup fixture\n";
+    close $log_fh;
+
+    $config_file = $smoke_config;
+    %error_counts = ();
+    %last_alert_time = ();
+
+    write_smoke_config($smoke_config, {
+        slack_webhook => 'https://hooks.slack.com/services/T00/DUMMY/FAKE',
+        slack_proxy => 'http://127.0.0.1:18080',
+        log_files => [$smoke_log],
+        patterns => [
+            {
+                name => 'SMOKE_STARTUP',
+                regex => 'STARTUP_SMOKE',
+                severity => 'info',
+                cooldown => 0,
+            },
+        ],
+    });
+
+    reload_config('smoke-startup', fatal => 1);
+    process_line('STARTUP_SMOKE initial config loaded', $smoke_log);
+    say sprintf(
+        'SMOKE startup_load ok patterns=%d log_files=%d slack_proxy=%s startup_matches=%d',
+        scalar(@patterns),
+        scalar(@{$watchdog_config{log_files}}),
+        defined($watchdog_config{slack_proxy}) ? 'enabled' : 'disabled',
+        $error_counts{SMOKE_STARTUP} // 0,
+    );
+
+    write_smoke_config($smoke_config, {
+        slack_webhook => 'https://hooks.slack.com/services/T00/DUMMY/FAKE',
+        slack_proxy => undef,
+        log_files => [$smoke_log],
+        patterns => [
+            {
+                name => 'SMOKE_RELOAD',
+                regex => 'RELOAD_SMOKE',
+                severity => 'info',
+                cooldown => 0,
+            },
+            {
+                name => 'SMOKE_TIMEOUT',
+                regex => 'timeout',
+                severity => 'warning',
+                cooldown => 120,
+            },
+        ],
+    });
+
+    kill 'HUP', $$;
+    usleep(100_000);
+
+    process_line('RELOAD_SMOKE config reloaded by sighup', $smoke_log);
+    process_line('STARTUP_SMOKE should no longer match after reload', $smoke_log);
+    say sprintf(
+        'SMOKE sighup_reload ok patterns=%d log_files=%d slack_proxy=%s reload_matches=%d startup_matches=%d',
+        scalar(@patterns),
+        scalar(@{$watchdog_config{log_files}}),
+        defined($watchdog_config{slack_proxy}) ? 'enabled' : 'disabled',
+        $error_counts{SMOKE_RELOAD} // 0,
+        $error_counts{SMOKE_STARTUP} // 0,
+    );
+    say 'SMOKE completed ok';
+}
+
 # ===─ Main ===================================================================================================─
 
 sub main {
@@ -584,6 +666,7 @@ sub main {
         'test-alert|t'  => \my $test_alert,
         'status|s'      => \my $show_status,
         'check-config'  => \my $check_config,
+        'smoke-reload'  => \my $smoke_reload,
         'help|h'        => \my $show_help,
         'fucking-help'  => \my $fucking_help,
     ) or die "Usage: $0 [options]\nTry --fucking-help if you're confused.\n";
@@ -598,6 +681,7 @@ sub main {
         say "  -t, --test-alert     Send test alert to Slack";
         say "  -s, --status         Show daemon status";
         say "  --check-config       Validate config and print the active runtime settings";
+        say "  --smoke-reload       Run startup-load and SIGHUP reload smoke path without daemonizing";
         say "  -h, --help           Show this help";
         say "  --fucking-help       Also this help (because you swore)";
         exit 0;
@@ -606,6 +690,11 @@ sub main {
     if ($check_config) {
         reload_config('check-config', fatal => 1);
         print_config_summary();
+        exit 0;
+    }
+
+    if ($smoke_reload) {
+        run_reload_smoke();
         exit 0;
     }
 
