@@ -877,31 +877,34 @@ def safe_generate_logd(
     try:
         return generate_logd(results, verbose)
     except Exception as exc:
-        logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
         error = format_exception_diagnostic(exc)
         print("    ERROR: Diagnostic finalization failed unexpectedly")
-        fallback_results = [
-            (
-                "diagnostic-finalizer",
-                False,
-                0.0,
-                error,
-                str(logd_path.relative_to(ROOT)) if logd_path.exists() else None,
-            )
-        ]
-        write_diagnostic_report(
-            metadata_path,
-            build_diagnostic_report(
-                fallback_results,
-                commit_id,
-                logd_error=error,
-                message_blocker="Diagnostic finalization failed; fallback JSON preserved the exception traceback.",
-            ),
-        )
         try:
-            commit_diagnostic_artifacts([metadata_path], commit_id)
-        except Exception as commit_exc:
-            print(f"    ERROR: Could not commit fallback diagnostic metadata: {commit_exc}")
+            logd_path, metadata_path, commit_id = diagnostic_paths_for_commit()
+            fallback_results = [
+                (
+                    "diagnostic-finalizer",
+                    False,
+                    0.0,
+                    error,
+                    str(logd_path.relative_to(ROOT)) if logd_path.exists() else None,
+                )
+            ]
+            write_diagnostic_report(
+                metadata_path,
+                build_diagnostic_report(
+                    fallback_results,
+                    commit_id,
+                    logd_error=error,
+                    message_blocker="Diagnostic finalization failed; fallback JSON preserved the exception traceback.",
+                ),
+            )
+            fallback_artifacts = [metadata_path]
+            if logd_path.exists():
+                fallback_artifacts.append(logd_path)
+            commit_diagnostic_artifacts(fallback_artifacts, commit_id)
+        except Exception as fallback_exc:
+            print(f"    ERROR: Fallback diagnostic metadata could not be written: {fallback_exc}")
         return False
 
 
