@@ -11,19 +11,21 @@ This tool is used by:
   - The on-call engineer (manual troubleshooting)
 
 The health check performs the following checks:
-  1. Service availability (HTTP health endpoints)
-  2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
-  4. Kafka connectivity (metadata fetch)
-  5. Message queue depth (consumer lag check)
-  6. Certificate expiry (TLS certificate check)
+import json
+import os
+import socket
+import platform
+import ssl
+import subprocess
+import sys
   7. Disk space (filesystem usage check)
-  8. Memory usage (process memory check)
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-Each check returns a status of OK, WARNING, or CRITICAL, along with
-a detail message and optional diagnostic data.
 
-Usage:
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
     python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
     python3 health_check.py --json            # JSON output
@@ -117,12 +119,13 @@ def check_certificate_expiry(host: str, port: int = 443) -> Tuple[str, str, int]
                 if not cert:
                     return "WARNING", "No certificate found", 0
 
-                from datetime import datetime as dt
-                expires = dt.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                days_left = (expires - dt.now()).days
-
-                if days_left > 30:
-                    return "OK", f"Certificate expires in {days_left} days", days_left
+def check_disk_space(path: str = "/") -> Tuple[str, str, Dict[str, Any]]:
+    """Check disk usage for the given path."""
+    try:
+        import shutil
+        usage = shutil.disk_usage(path)
+        total = usage.total
+        used = usage.used
                 elif days_left > 7:
                     return "WARNING", f"Certificate expires in {days_left} days", days_left
                 else:
@@ -138,12 +141,13 @@ def check_disk_usage(path: str = "/") -> Tuple[str, str, float]:
         free = stat.f_frsize * stat.f_bavail
         used = total - free
         pct = (used / total) * 100
+def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
+    """Check system memory usage."""
+    try:
+        # Linux path: read /proc/meminfo
+        with open("/proc/meminfo", "r") as f:
+            meminfo = f.read()
 
-        if pct < DISK_THRESHOLD_WARNING:
-            return "OK", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
-        elif pct < DISK_THRESHOLD_CRITICAL:
-            return "WARNING", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
-        else:
             return "CRITICAL", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
     except Exception as e:
         return "WARNING", f"Cannot check: {e}", 0
@@ -165,22 +169,62 @@ def check_memory_usage() -> Tuple[str, str, float]:
 
         total = meminfo.get("MemTotal", 0)
         available = meminfo.get("MemAvailable", 0)
-        used = total - available
-        pct = (used / total) * 100 if total > 0 else 0
+            "percent": percent,
+            "swap_total": swap_total,
+            "swap_free": swap_free,
+            "source": "proc_meminfo",
+        }
 
-        if pct < MEMORY_THRESHOLD_WARNING:
-            return "OK", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
-        elif pct < MEMORY_THRESHOLD_CRITICAL:
-            return "WARNING", f"{pct:.1f}% used", pct
-        else:
-            return "CRITICAL", f"{pct:.1f}% used", pct
+        return status, detail, data
+    except FileNotFoundError:
+        # Non-Linux fallback using standard library
+        import shutil
+        vm = shutil.disk_usage("/")
+        # For memory, try to use psutil if available, otherwise use a generic fallback
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            total = mem.total
+            available = mem.available
+            used = total - available
+            percent = mem.percent
+            status = "OK" if percent < MEMORY_THRESHOLD_WARNING else "WARNING" if percent < MEMORY_THRESHOLD_CRITICAL else "CRITICAL"
+            detail = f"Memory {percent:.1f}% used ({used // (1024*1024)}MB / {total // (1024*1024)}MB)"
+            data = {
+                "total": total,
+                "available": available,
+                "used": used,
+                "percent": percent,
+                "swap_total": 0,
+                "swap_free": 0,
+                "source": "psutil",
+            }
+            return status, detail, data
+        except ImportError:
+            # Fallback without psutil: report unknown but not failing
+            status = "WARNING"
+            detail = "Memory check: /proc/meminfo unavailable and psutil not installed; install psutil for cross-platform memory checks"
+            data = {
+                "total": 0,
+                "available": 0,
+                "used": 0,
+                "percent": 0.0,
+                "swap_total": 0,
+                "swap_free": 0,
+                "source": "unavailable",
+            }
+            return status, detail, data
     except Exception as e:
-        return "WARNING", f"Cannot check: {e}", 0
+        return "WARNING", f"Memory check failed: {e}", {}
 
-
-def check_load_average() -> Tuple[str, str, float]:
+    except Exception as e:
+def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
+    """Check system load average."""
     try:
-        with open("/proc/loadavg") as f:
+        # Linux path: read /proc/loadavg
+        with open("/proc/loadavg", "r") as f:
+            loadavg = f.read().strip()
+
             parts = f.read().strip().split()
             load = float(parts[0])
             cpu_count = os.cpu_count() or 1
@@ -188,22 +232,48 @@ def check_load_average() -> Tuple[str, str, float]:
 
             if load_pct < 70:
                 return "OK", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
-            elif load_pct < 90:
-                return "WARNING", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
-            else:
-                return "CRITICAL", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
+            "load1": load1,
+            "load5": load5,
+            "load15": load15,
+            "source": "proc_loadavg",
+        }
+
+        return status, detail, data
+    except FileNotFoundError:
+        # Non-Linux fallback using os.getloadavg()
+        try:
+            load1, load5, load15 = os.getloadavg()
+            status = "OK" if load1 < 2.0 else "WARNING" if load1 < 5.0 else "CRITICAL"
+            detail = f"Load average: {load1:.2f} {load5:.2f} {load15:.2f}"
+            data = {
+                "load1": load1,
+                "load5": load5,
+                "load15": load15,
+                "source": "os_getloadavg",
+            }
+            return status, detail, data
+        except (AttributeError, OSError):
+            # os.getloadavg() not available on this platform
+            status = "WARNING"
+            detail = "Load average check: /proc/loadavg unavailable and os.getloadavg() not supported on this platform"
+            data = {
+                "load1": 0.0,
+                "load5": 0.0,
+                "load15": 0.0,
+                "source": "unavailable",
+            }
+            return status, detail, data
     except Exception as e:
-        return "WARNING", f"Cannot check: {e}", 0
+        return "WARNING", f"Load average check failed: {e}", {}
 
-
-# ---------------------------------------------------------------------------
 # HEALTH CHECK RUNNER
-# ---------------------------------------------------------------------------
-
-def run_health_checks(service: Optional[str] = None, json_output: bool = False) -> Dict[str, Any]:
-    results: Dict[str, Any] = {
-        "timestamp": datetime.now().isoformat(),
-        "hostname": socket.gethostname(),
+def check_certificate_expiry(host: str, port: int = 443, timeout: int = 5) -> Tuple[str, str, Dict[str, Any]]:
+    """Check TLS certificate expiry for a given host."""
+    try:
+        import ssl
+        context = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=host) as ssock:
         "services": {},
         "infrastructure": {},
         "system": {},
@@ -229,12 +299,13 @@ def run_health_checks(service: Optional[str] = None, json_output: bool = False) 
             all_ok = False
 
     # Check infrastructure
-    for name, config in INFRASTRUCTURE.items():
-        if service and name != service:
-            continue
-        status, detail, latency = check_tcp_port(config["host"], config["port"], config["timeout"])
-        results["infrastructure"][name] = {
-            "status": status,
+def run_all_checks(args) -> Dict[str, Any]:
+    """Run all health checks and return results."""
+    results = {
+        "platform": platform.system(),
+        "timestamp": datetime.now().isoformat(),
+        "checks": {},
+        "overall_status": "OK",
             "detail": detail,
             "endpoint": f"{config['host']}:{config['port']}",
         }
@@ -293,12 +364,13 @@ def print_health_report(results: Dict[str, Any]):
                     print(f"    {status_icon} {name}: {check['detail']}")
                 else:
                     print(f"    {name}:")
-                    for sub_name, sub_check in check.items():
-                        if isinstance(sub_check, dict) and "status" in sub_check:
-                            sub_icon = {"OK": "✓", "WARNING": "⚠", "CRITICAL": "✗"}.get(sub_check["status"], "?")
-                            print(f"      {sub_icon} {sub_name}: {sub_check['detail']}")
-    print()
 
+def main():
+    parser = argparse.ArgumentParser(description="Health check tool for Tent of Trials")
+    import argparse
+    parser.add_argument("--service", help="Check specific service")
+    parser.add_argument("--json", action="store_true", help="Output JSON")
+    parser.add_argument("--watch", action="store_true", help="Continuous monitoring")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Health check tool")
@@ -323,9 +395,10 @@ def main():
                 else:
                     print_health_report(results)
                 time.sleep(args.interval)
-        except KeyboardInterrupt:
-            print("\nMonitoring stopped")
-    else:
+
+if __name__ == "__main__":
+    main()
+
         results = run_health_checks(args.service, args.json)
         if args.json:
             output = json.dumps(results, indent=2)
