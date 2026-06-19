@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-06-19T09:34:45.349944+00:00",
+  "commit": "31d15a71",
+  "diagnostic_logd": null,
+  "diagnostic_logd_error": "Encrypted .logd could not be produced in this host environment: WSL lacks libstdc++/libgcc for linux-x64 encryptly; Windows encryptly pack exited 1 without producing a .logd file.",
+  "message_blocker": "Diagnostic JSON follows build.py metadata schema and records the local .logd packaging blocker.",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": null,
+  "decrypt_command": null,
+  "total_modules": 3,
+  "passed": 3,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "python-py_compile",
+      "status": "PASS",
+      "elapsed_seconds": 0.1,
+      "artifact": null,
+      "output": "python -m py_compile build.py completed successfully."
+    },
+    {
+      "name": "safe-generate-logd-fallback",
+      "status": "PASS",
+      "elapsed_seconds": 5.8,
+      "artifact": null,
+      "output": "generate_logd was monkeypatched to raise RuntimeError; safe_generate_logd caught it, wrote fallback metadata, and returned False without crashing."
+    },
+    {
+      "name": "fallback-path-failure-guard",
+      "status": "PASS",
+      "elapsed_seconds": 0.1,
+      "artifact": null,
+      "output": "diagnostic_paths_for_commit was monkeypatched to raise RuntimeError after generate_logd failed; safe_generate_logd still returned False instead of raising."
+    }
+  ],
+  "pr_note": "Encrypted diagnostic logd artifact was not created; include this JSON report showing why. The encrypted .logd is the required diagnostic content for PR review; this JSON file is metadata. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
