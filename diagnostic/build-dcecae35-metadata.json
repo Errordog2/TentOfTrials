@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-06-19T07:26:42.288795+00:00",
+  "commit": "dcecae35",
+  "diagnostic_logd": "diagnostic/build-dcecae35.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "908de6d926ce662f5fa8",
+  "decrypt_command": "encryptly unpack diagnostic/build-dcecae35.logd <outdir> --password 908de6d926ce662f5fa8",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "v2-market-stream",
+      "status": "PASS",
+      "elapsed_seconds": 0.014,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-dcecae35.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

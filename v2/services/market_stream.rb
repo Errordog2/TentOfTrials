@@ -105,6 +105,52 @@ end
 
 $logger.info "v2 MarketStream service starting. Hold onto your butts."
 
+# ===─ Bounded Async Queue ================================================================================
+
+class BoundedBatchQueue
+  attr_reader :dropped_batches
+
+  def initialize(capacity)
+    @capacity = capacity
+    @queue = []
+    @mutex = Mutex.new
+    @condition = ConditionVariable.new
+    @closed = false
+    @dropped_batches = 0
+  end
+
+  def push(batch)
+    @mutex.synchronize do
+      if @queue.length >= @capacity
+        @queue.shift
+        @dropped_batches += 1
+      end
+      @queue << batch
+      @condition.signal
+    end
+  end
+
+  def pop
+    @mutex.synchronize do
+      @condition.wait(@mutex) while @queue.empty? && !@closed
+      return nil if @queue.empty?
+
+      @queue.shift
+    end
+  end
+
+  def close
+    @mutex.synchronize do
+      @closed = true
+      @condition.broadcast
+    end
+  end
+
+  def length
+    @mutex.synchronize { @queue.length }
+  end
+end
+
 # ===─ Tick History =======================================================================================
 
 class TickHistory
@@ -161,6 +207,8 @@ end
 class MarketStreamClient < EM::Connection
   attr_reader :instrument_ids, :connected
 
+  FLUSH_QUEUE_CAPACITY = 1_000
+
   def initialize(instrument_ids, on_tick, on_error)
     @instrument_ids = instrument_ids
     @on_tick = on_tick
@@ -169,6 +217,8 @@ class MarketStreamClient < EM::Connection
     @buffer = []
     @buffer_mutex = Mutex.new
     @last_flush = Time.at(0)
+    @flush_queue = BoundedBatchQueue.new(FLUSH_QUEUE_CAPACITY)
+    @drain_worker = start_drain_worker
     @sequence = 0
     @reconnect_attempt = 0
 
@@ -244,20 +294,34 @@ class MarketStreamClient < EM::Connection
   end
 
   def flush_buffer
-    # TODO: The flush is synchronous and blocks the reactor. For high-throughput
-    # scenarios (100k+ ticks/sec), this becomes a bottleneck. The fix is to
-    # write to a ring buffer and let a separate thread drain it. The ring buffer
-    # implementation is in `v2/lib/ring_buffer.rb` which doesn't exist yet.
-    # The ticket for this is V2-847. It's in the "Sprint Backlog" which means
-    # it's prioritized but nobody's picked it up yet. Because everyone's busy
-    # fixing the shit that v1 broke.
+    batch = nil
     @buffer_mutex.synchronize do
       return if @buffer.empty?
       batch = @buffer.dup
       @buffer.clear
       @last_flush = Time.now
-      Thread.new { @on_tick&.call(batch) }
     end
+    @flush_queue.push(batch)
+    $logger.warn "Dropped #{@flush_queue.dropped_batches} old tick batch(es) under backpressure" if @flush_queue.dropped_batches.positive?
+  end
+
+  def start_drain_worker
+    Thread.new do
+      Thread.current.name = 'market-stream-flush-drain' if Thread.current.respond_to?(:name=)
+      while (batch = @flush_queue.pop)
+        begin
+          @on_tick&.call(batch)
+        rescue StandardError => e
+          $logger.error "Tick drain worker error: #{e.message}"
+          @on_error&.call(e)
+        end
+      end
+    end
+  end
+
+  def shutdown_drain_worker
+    @flush_queue.close
+    @drain_worker&.join(2)
   end
 
   def send_json(obj)
@@ -412,6 +476,34 @@ def run_tick_history_smoke
   puts JSON.generate({ status: 'ok', btc_count: btc[:count], eth_count: eth[:count] })
 end
 
+def run_flush_queue_smoke
+  queue = BoundedBatchQueue.new(2)
+  queue.push([{ sequence: 1 }])
+  queue.push([{ sequence: 2 }])
+  queue.push([{ sequence: 3 }])
+
+  first = queue.pop
+  second = queue.pop
+  raise "expected oldest batch to be dropped" unless first.first[:sequence] == 2
+  raise "expected newest batch to be retained" unless second.first[:sequence] == 3
+  raise "expected one dropped batch" unless queue.dropped_batches == 1
+
+  drained = []
+  drain_queue = BoundedBatchQueue.new(4)
+  worker = Thread.new do
+    while (batch = drain_queue.pop)
+      drained << batch.first[:sequence]
+    end
+  end
+  [10, 11, 12].each { |sequence| drain_queue.push([{ sequence: sequence }]) }
+  sleep 0.05
+  drain_queue.close
+  worker.join(2)
+  raise "expected drain worker to process queued batches in order" unless drained == [10, 11, 12]
+
+  puts JSON.generate({ status: 'ok', dropped_batches: queue.dropped_batches, drained: drained })
+end
+
 # ===─ CLI =========================================================================================================
 
 case ARGV.first
@@ -420,6 +512,8 @@ when 'start'
   start_service
 when 'smoke-tick-history'
   run_tick_history_smoke
+when 'smoke-flush-queue'
+  run_flush_queue_smoke
 when 'stop'
   $logger.info "Stop requested. Sending SIGTERM to #{Process.pid}"
   Process.kill('TERM', Process.pid)
