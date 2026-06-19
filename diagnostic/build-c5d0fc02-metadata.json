@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-06-19T06:44:22.061228+00:00",
+  "commit": "c5d0fc02",
+  "diagnostic_logd": "diagnostic/build-c5d0fc02.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "9f617c05f00d1496e8b3",
+  "decrypt_command": "encryptly unpack diagnostic/build-c5d0fc02.logd <outdir> --password 9f617c05f00d1496e8b3",
+  "total_modules": 1,
+  "passed": 1,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "v2-market-stream",
+      "status": "PASS",
+      "elapsed_seconds": 0.013,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-c5d0fc02.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

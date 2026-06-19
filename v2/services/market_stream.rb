@@ -54,6 +54,7 @@ require 'em-websocket-client'
 require 'redis'
 require 'sinatra/base'
 require 'logger'
+require 'thread'
 
 # ===─ Fucking Constants =================================================================================─
 
@@ -104,6 +105,57 @@ end
 
 $logger.info "v2 MarketStream service starting. Hold onto your butts."
 
+# ===─ Tick History =======================================================================================
+
+class TickHistory
+  DEFAULT_LIMIT = 100
+  MAX_LIMIT = 1_000
+
+  def initialize(capacity = Constants::MAX_TICK_HISTORY)
+    @capacity = capacity
+    @ticks_by_instrument = Hash.new { |h, instrument| h[instrument] = [] }
+    @mutex = Mutex.new
+  end
+
+  def record(data)
+    Array(data).each { |tick| record_tick(tick) }
+  end
+
+  def recent(instrument, limit: DEFAULT_LIMIT)
+    safe_limit = normalize_limit(limit)
+    @mutex.synchronize do
+      ticks = @ticks_by_instrument[instrument].last(safe_limit)
+      {
+        instrument: instrument,
+        ticks: ticks,
+        count: ticks.length,
+      }
+    end
+  end
+
+  private
+
+  def record_tick(tick)
+    return unless tick.is_a?(Hash)
+
+    instrument = tick[:instrument] || tick['instrument'] || tick[:instrument_id] || tick['instrument_id']
+    return if instrument.nil? || instrument.to_s.empty?
+
+    @mutex.synchronize do
+      history = @ticks_by_instrument[instrument.to_s]
+      history << tick
+      overflow = history.length - @capacity
+      history.shift(overflow) if overflow.positive?
+    end
+  end
+
+  def normalize_limit(limit)
+    parsed = limit.to_i
+    parsed = DEFAULT_LIMIT if parsed <= 0
+    [parsed, MAX_LIMIT, @capacity].min
+  end
+end
+
 # ===─ Market Stream Client ==============================================================================
 
 class MarketStreamClient < EM::Connection
@@ -116,6 +168,7 @@ class MarketStreamClient < EM::Connection
     @connected = false
     @buffer = []
     @buffer_mutex = Mutex.new
+    @last_flush = Time.at(0)
     @sequence = 0
     @reconnect_attempt = 0
 
@@ -171,12 +224,12 @@ class MarketStreamClient < EM::Connection
   def process_message(msg)
     case msg[:type]
     when 'tick'
+      should_flush = false
       @buffer_mutex.synchronize do
         @buffer << msg
-        if @buffer.length >= 100 || (Time.now.to_f - @last_flush.to_f) >= Constants::BATCH_FLUSH_INTERVAL
-          flush_buffer
-        end
+        should_flush = @buffer.length >= 100 || (Time.now.to_f - @last_flush.to_f) >= Constants::BATCH_FLUSH_INTERVAL
       end
+      flush_buffer if should_flush
     when 'trade'
       @on_tick&.call(msg) if @on_tick
     when 'subscription_confirmed'
@@ -266,10 +319,7 @@ class MarketStreamAPI < Sinatra::Base
   # Return recent ticks for an instrument
   get '/api/v2/market/ticks/:instrument' do
     content_type :json
-    # TODO: Actually store and serve historical ticks.
-    # Right now this returns an empty array. The v1 API did the same thing.
-    # So technically this is not a regression. It's feature parity.
-    { instrument: params[:instrument], ticks: [], count: 0 }.to_json
+    $tick_history.recent(params[:instrument], limit: params[:limit]).to_json
   end
 
   # Return service status
@@ -302,6 +352,7 @@ end
 
 $start_time = Time.now.utc
 $message_count = 0
+$tick_history = TickHistory.new
 
 def start_service
   EM.run do
@@ -315,6 +366,7 @@ def start_service
       ENV.fetch('INSTRUMENTS', 'BTC/USD,ETH/USD').split(','),
       ->(data) {
         $message_count += data.is_a?(Array) ? data.length : 1
+        $tick_history.record(data)
       },
       ->(error) {
         $logger.error "Market stream error: #{error.message}"
@@ -340,12 +392,34 @@ rescue StandardError => e
   exit 1
 end
 
+def run_tick_history_smoke
+  history = TickHistory.new(3)
+  history.record([
+    { instrument: 'BTC/USD', price: 100, sequence: 1 },
+    { instrument: 'ETH/USD', price: 200, sequence: 1 },
+    { instrument: 'BTC/USD', price: 101, sequence: 2 },
+    { instrument: 'BTC/USD', price: 102, sequence: 3 },
+    { instrument: 'BTC/USD', price: 103, sequence: 4 },
+  ])
+
+  btc = history.recent('BTC/USD', limit: 2)
+  eth = history.recent('ETH/USD')
+
+  raise "expected 2 BTC/USD ticks, got #{btc[:count]}" unless btc[:count] == 2
+  raise "expected bounded newest BTC/USD ticks" unless btc[:ticks].map { |tick| tick[:sequence] } == [3, 4]
+  raise "expected 1 ETH/USD tick, got #{eth[:count]}" unless eth[:count] == 1
+
+  puts JSON.generate({ status: 'ok', btc_count: btc[:count], eth_count: eth[:count] })
+end
+
 # ===─ CLI =========================================================================================================
 
 case ARGV.first
 when 'start'
   $logger.info "v2 MarketStream v#{V2_VERSION} (#{V2_BUILD})"
   start_service
+when 'smoke-tick-history'
+  run_tick_history_smoke
 when 'stop'
   $logger.info "Stop requested. Sending SIGTERM to #{Process.pid}"
   Process.kill('TERM', Process.pid)
