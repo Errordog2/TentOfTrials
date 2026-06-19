@@ -47,7 +47,6 @@ use v5.32;
 
 use Cwd 'abs_path';
 use Data::Dumper;
-use File::Tail;
 use Getopt::Long;
 use HTTP::Tiny;
 use IO::Socket::INET;
@@ -66,6 +65,7 @@ use constant {
     HEARTBEAT_FILE => '/tmp/v2-watchdog-heartbeat',
     PID_FILE       => '/tmp/v2-watchdog.pid',
     MAX_LINE_LEN   => 8192,  # lines longer than this get truncated before regex. mostly.
+    MAGIC_NUMBER_47 => 47,
 };
 
 # ===─ Goddamn Global State ==============================================================================
@@ -85,10 +85,16 @@ my $alert_count = 0;
 my %error_counts = ();
 my %last_alert_time = ();
 my $start_time   = time();
+my %watchdog_config = (
+    slack_webhook => SLACK_WEBHOOK,
+    slack_proxy   => undef,
+    log_files     => [],
+);
 
 # Regex patterns for error detection.
 # Each pattern has: name, regex, severity, cooldown_seconds
-my @patterns = (
+sub default_patterns {
+    return (
     { name => 'FATAL_ERROR',        regex => qr/\b(FATAL|CRITICAL|EMERGENCY)\b/i, severity => 'critical', cooldown => 60 },
     { name => 'STACK_TRACE',        regex => qr/\s+at\s+\S+\.\S+\(/,           severity => 'warning',  cooldown => 300 },
     { name => 'OUT_OF_MEMORY',      regex => qr/\b(OutOfMemory|OOM|OoM)\b/i,    severity => 'critical', cooldown => 30 },
@@ -100,7 +106,22 @@ my @patterns = (
     { name => 'AUTH_FAILURE',       regex => qr/\b(authentication failed|invalid token|unauthorized)\b/i, severity => 'warning', cooldown => 120 },
     { name => 'DISK_FULL',          regex => qr/\b(No space left|disk full|ENOSPC)\b/i, severity => 'critical', cooldown => 30 },
     { name => 'FUCK',               regex => qr/\bfuck\b/i,                      severity => 'info',     cooldown => 0 },
-);
+    );
+}
+
+sub default_log_files {
+    return qw(
+        /var/log/tent/backend.log
+        /var/log/tent/market.log
+        /var/log/tent/frontend.log
+        /var/log/tent/gateway.log
+        /var/log/tent/compliance.log
+        /var/log/tent/engine.log
+        /var/log/syslog
+    );
+}
+
+my @patterns = default_patterns();
 
 # ===─ Signal Handling ====================================================================================─
 
@@ -121,10 +142,7 @@ $SIG{TERM} = \&handle_signal;
 $SIG{INT}  = \&handle_signal;
 $SIG{HUP}  = sub {
     say "[$$] SIGHUP received. Reloading configuration...";
-    # TODO: Actually reload config. Currently this is a no-op.
-    # The config reload logic was supposed to be implemented in
-    # the v2 release but it was cut due to scope creep. The ticket
-    # is V2-119. It's been in the backlog for 6 months.
+    reload_config('SIGHUP');
 };
 
 # ===─ Utility Functions =================================================================================
@@ -133,6 +151,193 @@ sub log_msg {
     my ($level, $msg) = @_;
     my $ts = strftime("%Y-%m-%d %H:%M:%S", localtime);
     say "[$ts] [$level] [Watchdog] $msg";
+}
+
+sub strip_config_scalar {
+    my $value = shift // '';
+    $value =~ s/^\s+|\s+$//g;
+    $value =~ s/\s+#.*$//;
+    $value =~ s/^['"]|['"]$//g;
+    return undef if $value eq '' || lc($value) eq 'null';
+    return JSON::PP::true  if lc($value) eq 'true';
+    return JSON::PP::false if lc($value) eq 'false';
+    return $value + 0 if $value =~ /^\d+$/;
+    return $value;
+}
+
+sub parse_simple_yaml_config {
+    my ($text) = @_;
+    my %config;
+    my $section;
+    my $current_pattern;
+
+    foreach my $raw_line (split /\n/, $text) {
+        my $line = $raw_line;
+        next if $line =~ /^\s*(?:#|$)/;
+
+        if ($line =~ /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/) {
+            my ($key, $value) = ($1, $2);
+            $section = $key;
+            if ($value ne '') {
+                $config{$key} = strip_config_scalar($value);
+                $section = undef;
+            } elsif ($key eq 'log_files') {
+                $config{log_files} = [];
+            } elsif ($key eq 'patterns') {
+                $config{patterns} = [];
+            }
+            next;
+        }
+
+        if (($section // '') eq 'log_files' && $line =~ /^\s*-\s*(.+)$/) {
+            push @{$config{log_files}}, strip_config_scalar($1);
+            next;
+        }
+
+        if (($section // '') eq 'patterns') {
+            if ($line =~ /^\s*-\s*(?:name:\s*)?(.+)$/) {
+                $current_pattern = {};
+                push @{$config{patterns}}, $current_pattern;
+                $current_pattern->{name} = strip_config_scalar($1);
+                next;
+            }
+            if (defined $current_pattern && $line =~ /^\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.+)$/) {
+                $current_pattern->{$1} = strip_config_scalar($2);
+                next;
+            }
+        }
+
+        die "Unsupported config line: $raw_line\n";
+    }
+
+    return \%config;
+}
+
+sub read_watchdog_config {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or die "Cannot read config $path: $!\n";
+    local $/;
+    my $text = <$fh>;
+    close $fh;
+
+    $text =~ s/^\x{FEFF}//;
+    return decode_json($text) if $text =~ /^\s*[{[]/;
+    return parse_simple_yaml_config($text);
+}
+
+sub compile_config_pattern {
+    my ($entry) = @_;
+    die "Pattern entry must be an object\n" if ref($entry) ne 'HASH';
+
+    for my $field (qw(name regex severity cooldown)) {
+        die "Pattern is missing $field\n" unless exists $entry->{$field} && defined $entry->{$field};
+    }
+
+    die "Pattern cooldown must be numeric for $entry->{name}\n"
+        unless $entry->{cooldown} =~ /^\d+$/;
+
+    my %allowed_severity = map { $_ => 1 } qw(info warning error critical);
+    die "Pattern severity must be one of info, warning, error, critical for $entry->{name}\n"
+        unless $allowed_severity{$entry->{severity}};
+
+    my $regex = eval {
+        $entry->{case_insensitive}
+            ? qr/$entry->{regex}/i
+            : qr/$entry->{regex}/;
+    };
+    die "Invalid regex for $entry->{name}: $@\n" if $@;
+
+    return {
+        name     => $entry->{name},
+        regex    => $regex,
+        severity => $entry->{severity},
+        cooldown => int($entry->{cooldown}),
+    };
+}
+
+sub build_runtime_config {
+    my ($data) = @_;
+    my %next = (
+        slack_webhook => SLACK_WEBHOOK,
+        slack_proxy   => undef,
+        log_files     => [],
+    );
+    my @next_patterns = default_patterns();
+
+    if (exists $data->{slack_webhook}) {
+        die "slack_webhook must be a string\n" if ref($data->{slack_webhook});
+        $next{slack_webhook} = $data->{slack_webhook};
+    }
+
+    if (exists $data->{slack_proxy}) {
+        die "slack_proxy must be a string or null\n" if ref($data->{slack_proxy});
+        $next{slack_proxy} = $data->{slack_proxy};
+    }
+
+    if (exists $data->{log_files}) {
+        die "log_files must be a list\n" if ref($data->{log_files}) ne 'ARRAY';
+        $next{log_files} = [ grep { defined && $_ ne '' } @{$data->{log_files}} ];
+    }
+
+    if (exists $data->{patterns}) {
+        die "patterns must be a non-empty list\n"
+            if ref($data->{patterns}) ne 'ARRAY' || @{$data->{patterns}} == 0;
+        @next_patterns = map { compile_config_pattern($_) } @{$data->{patterns}};
+    }
+
+    return (\%next, \@next_patterns);
+}
+
+sub reload_config {
+    my ($source, %opts) = @_;
+    my $fatal = $opts{fatal} // 0;
+
+    if (!-f $config_file) {
+        my $msg = "Config file $config_file not found";
+        if ($config_file eq DEFAULT_CONFIG) {
+            log_msg('WARN', "$msg; using built-in defaults");
+            return 1;
+        }
+        log_msg('ERROR', "$msg; keeping previous runtime configuration");
+        die "$msg\n" if $fatal;
+        return 0;
+    }
+
+    my $ok = eval {
+        my $raw_config = read_watchdog_config($config_file);
+        my ($next_config, $next_patterns) = build_runtime_config($raw_config);
+        %watchdog_config = %{$next_config};
+        @patterns = @{$next_patterns};
+        log_msg('INFO', sprintf(
+            "Configuration loaded from %s via %s: %d patterns, %d configured log files, Slack proxy %s",
+            $config_file,
+            $source,
+            scalar(@patterns),
+            scalar(@{$watchdog_config{log_files}}),
+            defined($watchdog_config{slack_proxy}) ? 'enabled' : 'disabled',
+        ));
+        1;
+    };
+
+    if (!$ok) {
+        chomp(my $err = $@ || 'unknown error');
+        log_msg('ERROR', "Configuration reload failed via $source: $err; keeping previous runtime configuration");
+        die "$err\n" if $fatal;
+        return 0;
+    }
+
+    return 1;
+}
+
+sub print_config_summary {
+    say "Config OK: $config_file";
+    say "Slack webhook: " . ($watchdog_config{slack_webhook} ? 'configured' : 'disabled');
+    say "Slack proxy: " . (defined($watchdog_config{slack_proxy}) ? $watchdog_config{slack_proxy} : 'disabled');
+    say "Configured log files: " . scalar(@{$watchdog_config{log_files}});
+    say "Patterns:";
+    foreach my $pattern (@patterns) {
+        printf "  %-24s %-8s cooldown=%s\n", $pattern->{name}, $pattern->{severity}, $pattern->{cooldown};
+    }
 }
 
 sub slack_alert {
@@ -158,15 +363,13 @@ sub slack_alert {
     # times out. For a monitoring daemon. In production.
     # In v2, we set a 5-second timeout. That's still too long for a
     # monitoring daemon, but it's better than fucking infinite.
-    my $http = HTTP::Tiny->new(timeout => 5);
+    my %http_args = (timeout => 5);
+    $http_args{proxy} = $watchdog_config{slack_proxy} if defined $watchdog_config{slack_proxy};
+    my $http = HTTP::Tiny->new(%http_args);
     my $payload = encode_json({ text => $message, mrkdwn => JSON::PP::true });
 
-    # TODO: The Slack webhook call bypasses the proxy. If the monitoring
-    # network doesn't have direct internet access, this will fail silently.
-    # The proxy configuration was supposed to be in the config file but
-    # the config file parsing is also not fully implemented. See V2-119.
     eval {
-        my $response = $http->post(SLACK_WEBHOOK, {
+        my $response = $http->post($watchdog_config{slack_webhook}, {
             content => $payload,
             headers => { 'Content-Type' => 'application/json' },
         });
@@ -229,18 +432,15 @@ sub watch_files {
         # Default log locations. In v1, these were hardcoded in 4 different
         # places with 4 different lists. We consolidated them into ONE list.
         # Progress.
-        @log_files = qw(
-            /var/log/tent/backend.log
-            /var/log/tent/market.log
-            /var/log/tent/frontend.log
-            /var/log/tent/gateway.log
-            /var/log/tent/compliance.log
-            /var/log/tent/engine.log
-            /var/log/syslog
-        );
+        @log_files = @{$watchdog_config{log_files}} ? @{$watchdog_config{log_files}} : default_log_files();
     }
 
     log_msg('INFO', "Watching " . scalar(@log_files) . " log files");
+
+    eval { require File::Tail; 1 } or do {
+        log_msg('ERROR', "File::Tail is required to watch files: $@");
+        return;
+    };
 
     my @tails;
     foreach my $file (@log_files) {
@@ -324,7 +524,8 @@ sub daemonize {
     setsid() or die "setsid failed: $!";
 
     # Write PID file
-    open(my $pf, '>', PID_FILE) or warn "Cannot write PID file $PID_FILE: $!";
+    my $pid_file = PID_FILE;
+    open(my $pf, '>', $pid_file) or warn "Cannot write PID file $pid_file: $!";
     print $pf $$;
     close $pf;
 
@@ -382,6 +583,7 @@ sub main {
         'verbose|v'     => \$verbose,
         'test-alert|t'  => \my $test_alert,
         'status|s'      => \my $show_status,
+        'check-config'  => \my $check_config,
         'help|h'        => \my $show_help,
         'fucking-help'  => \my $fucking_help,
     ) or die "Usage: $0 [options]\nTry --fucking-help if you're confused.\n";
@@ -390,15 +592,24 @@ sub main {
         say "Usage: $0 [options] [log_file ...]";
         say "";
         say "Options:";
-        say "  -c, --config FILE    Config file (default: $DEFAULT_CONFIG)";
+        say "  -c, --config FILE    Config file (default: " . DEFAULT_CONFIG . ")";
         say "  -d, --daemon         Run as daemon";
         say "  -v, --verbose        Verbose output";
         say "  -t, --test-alert     Send test alert to Slack";
         say "  -s, --status         Show daemon status";
+        say "  --check-config       Validate config and print the active runtime settings";
         say "  -h, --help           Show this help";
         say "  --fucking-help       Also this help (because you swore)";
         exit 0;
     }
+
+    if ($check_config) {
+        reload_config('check-config', fatal => 1);
+        print_config_summary();
+        exit 0;
+    }
+
+    reload_config('startup', fatal => ($config_file ne DEFAULT_CONFIG));
 
     if ($test_alert) {
         send_test_alert();

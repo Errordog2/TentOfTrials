@@ -85,6 +85,52 @@ Alerts are sent to PagerDuty and Slack (#ops-alerts channel).
 | DBConnectionPool | Pool exhaustion risk | Critical | 10 minutes |
 | QueueBacklog | Queue depth > 10000 for 5 minutes | Warning | 15 minutes |
 
+### Log Watchdog Config Reload
+
+`v2/scripts/log_watchdog.pl` loads alert patterns, cooldowns, Slack webhook,
+optional Slack proxy, and default watched log files from the configured file at
+startup. The daemon also reloads the same file on `SIGHUP`; invalid reloads are
+logged and the last known-good runtime configuration stays active.
+
+Use the checked-in sample before touching production credentials:
+
+```bash
+perl v2/scripts/log_watchdog.pl \
+  --config v2/config/log_watchdog.example.json \
+  --check-config
+```
+
+Expected smoke output includes the configured proxy, log-file count, and
+compiled patterns:
+
+```text
+Config OK: v2/config/log_watchdog.example.json
+Slack webhook: configured
+Slack proxy: http://proxy.internal.example:8080
+Configured log files: 2
+Patterns:
+  FATAL_ERROR              critical cooldown=60
+  TIMEOUT                  warning  cooldown=120
+  AUTH_FAILURE             warning  cooldown=120
+```
+
+On an operations host with `File::Tail` installed, validate the reload path with
+a temporary copy of the config:
+
+```bash
+cp v2/config/log_watchdog.example.json /tmp/log_watchdog.reload.json
+perl v2/scripts/log_watchdog.pl --config /tmp/log_watchdog.reload.json &
+watchdog_pid=$!
+# Edit /tmp/log_watchdog.reload.json, for example change TIMEOUT cooldown.
+kill -HUP "$watchdog_pid"
+kill -TERM "$watchdog_pid"
+```
+
+The daemon should log a successful `Configuration loaded` line after startup and
+again after `SIGHUP`. If the edited file contains an invalid regex, missing
+pattern field, or non-numeric cooldown, the daemon logs `Configuration reload
+failed` and keeps the previous settings.
+
 ## Incident Response
 
 ### Severity Levels
