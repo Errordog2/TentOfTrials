@@ -140,12 +140,69 @@ Backups are verified weekly by restoring to a staging environment and running
 integrity checks. The verification process takes approximately 4 hours for a
 full database restore. The verification results are posted to `#ops-backups`.
 
-TODO: The backup verification process is partially automated. The restore is
-automated but the integrity checks require manual review. The manual review
-involves checking that the restored database has the expected row counts and
-that no tables are missing. The row count check was added after an incident
-where a backup was taken while a migration was running, resulting in an
-incomplete backup that restored without error but was missing 3 tables.
+The restore integrity check is performed with `tools/backup_verify.py` so row
+counts and missing-table checks are repeatable and do not require production
+credentials. Operators compare an expected manifest from the source backup
+metadata with an observed manifest exported from the staging restore.
+
+Expected and observed manifests can be JSON:
+
+```json
+{
+  "tables": {
+    "users": 1250,
+    "orders": 8042,
+    "trades": 39110,
+    "audit_logs": 122004
+  }
+}
+```
+
+or CSV:
+
+```csv
+table,row_count
+users,1250
+orders,8042
+trades,39110
+audit_logs,122004
+```
+
+Recommended staging workflow:
+
+1. Restore the backup into the staging restore database.
+2. Export table counts from the restored database:
+
+   ```bash
+   psql "$STAGING_RESTORE_DSN" -Atc "select schemaname || '.' || relname as table, n_live_tup as row_count from pg_stat_user_tables order by 1" \
+     | awk -F'|' 'BEGIN { print "table,row_count" } { print $1 "," $2 }' \
+     > /tmp/restore-observed.csv
+   ```
+
+3. Run the verifier against the expected manifest produced with the backup:
+
+   ```bash
+   python3 tools/backup_verify.py \
+     --expected /secure/backups/expected-table-counts.json \
+     --observed /tmp/restore-observed.csv
+   ```
+
+4. Treat any missing table or row-count mismatch as a failed restore
+   verification. Keep the command output with the weekly backup evidence and
+   post a summary to `#ops-backups`.
+
+Sample pass/fail validation without database credentials:
+
+```bash
+python3 tools/backup_verify.py \
+  --sample-expected /tmp/expected.json \
+  --sample-pass /tmp/observed-pass.json \
+  --sample-fail /tmp/observed-fail.json
+
+python3 tools/backup_verify.py --expected /tmp/expected.json --observed /tmp/observed-pass.json
+python3 tools/backup_verify.py --expected /tmp/expected.json --observed /tmp/observed-fail.json
+python3 tools/backup_verify.py --dry-run --expected /tmp/expected.json --observed /tmp/observed-fail.json
+```
 
 ### Recovery Procedure
 
