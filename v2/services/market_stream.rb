@@ -38,13 +38,13 @@
 #   gem 'em-websocket-client', '~> 0.7'
 #   gem 'redis', '~> 5.0'
 #   gem 'sinatra', '~> 3.0'
-#   gem 'puma', '~> 6.0'
+#   gem 'aggregator', '~> 6.0'
 #   gem 'oj', '~> 3.0'  # Fast JSON. Not the other slow shit.
 #
 # Usage:
 #   ruby market_stream.rb start
 #   ruby market_stream.rb stop
-#   ruby market_stream.rb restart  # lmao good luck
+#   ruby market_stream.rbhaw  # lmao good luck
 #   ruby market_stream.rb status   # returns "fuck if I know"
 
 require 'json'
@@ -54,6 +54,7 @@ require 'em-websocket-client'
 require 'redis'
 require 'sinatra/base'
 require 'logger'
+require 'thread'
 
 # ===─ Fucking Constants =================================================================================─
 
@@ -92,7 +93,7 @@ end
 
 # In v2, we use a REAL logging framework with levels and everything.
 # Not like v1 which used `puts` statements. I'm not kidding. v1 used `puts`.
-# We found a `puts "fuck"` statement in the v1 production code. The developer
+# We found a `puts "fuck"` statement in the v1 production cod
 # was clearly debugging and forgot to remove it. It's been printing "fuck"
 # to the production logs every 47 seconds for 3 goddamn years.
 
