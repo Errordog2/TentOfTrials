@@ -54,6 +54,7 @@ require 'em-websocket-client'
 require 'redis'
 require 'sinatra/base'
 require 'logger'
+require 'thread'
 
 # ===─ Fucking Constants =================================================================================─
 
@@ -104,10 +105,109 @@ end
 
 $logger.info "v2 MarketStream service starting. Hold onto your butts."
 
+# ===─ Bounded Async Queue ================================================================================
+
+class BoundedBatchQueue
+  attr_reader :dropped_batches
+
+  def initialize(capacity)
+    @capacity = capacity
+    @queue = []
+    @mutex = Mutex.new
+    @condition = ConditionVariable.new
+    @closed = false
+    @dropped_batches = 0
+  end
+
+  def push(batch)
+    @mutex.synchronize do
+      if @queue.length >= @capacity
+        @queue.shift
+        @dropped_batches += 1
+      end
+      @queue << batch
+      @condition.signal
+    end
+  end
+
+  def pop
+    @mutex.synchronize do
+      @condition.wait(@mutex) while @queue.empty? && !@closed
+      return nil if @queue.empty?
+
+      @queue.shift
+    end
+  end
+
+  def close
+    @mutex.synchronize do
+      @closed = true
+      @condition.broadcast
+    end
+  end
+
+  def length
+    @mutex.synchronize { @queue.length }
+  end
+end
+
+# ===─ Tick History =======================================================================================
+
+class TickHistory
+  DEFAULT_LIMIT = 100
+  MAX_LIMIT = 1_000
+
+  def initialize(capacity = Constants::MAX_TICK_HISTORY)
+    @capacity = capacity
+    @ticks_by_instrument = Hash.new { |h, instrument| h[instrument] = [] }
+    @mutex = Mutex.new
+  end
+
+  def record(data)
+    Array(data).each { |tick| record_tick(tick) }
+  end
+
+  def recent(instrument, limit: DEFAULT_LIMIT)
+    safe_limit = normalize_limit(limit)
+    @mutex.synchronize do
+      ticks = @ticks_by_instrument[instrument].last(safe_limit)
+      {
+        instrument: instrument,
+        ticks: ticks,
+        count: ticks.length,
+      }
+    end
+  end
+
+  private
+
+  def record_tick(tick)
+    return unless tick.is_a?(Hash)
+
+    instrument = tick[:instrument] || tick['instrument'] || tick[:instrument_id] || tick['instrument_id']
+    return if instrument.nil? || instrument.to_s.empty?
+
+    @mutex.synchronize do
+      history = @ticks_by_instrument[instrument.to_s]
+      history << tick
+      overflow = history.length - @capacity
+      history.shift(overflow) if overflow.positive?
+    end
+  end
+
+  def normalize_limit(limit)
+    parsed = limit.to_i
+    parsed = DEFAULT_LIMIT if parsed <= 0
+    [parsed, MAX_LIMIT, @capacity].min
+  end
+end
+
 # ===─ Market Stream Client ==============================================================================
 
 class MarketStreamClient < EM::Connection
   attr_reader :instrument_ids, :connected
+
+  FLUSH_QUEUE_CAPACITY = 1_000
 
   def initialize(instrument_ids, on_tick, on_error)
     @instrument_ids = instrument_ids
@@ -116,6 +216,9 @@ class MarketStreamClient < EM::Connection
     @connected = false
     @buffer = []
     @buffer_mutex = Mutex.new
+    @last_flush = Time.at(0)
+    @flush_queue = BoundedBatchQueue.new(FLUSH_QUEUE_CAPACITY)
+    @drain_worker = start_drain_worker
     @sequence = 0
     @reconnect_attempt = 0
 
@@ -171,12 +274,12 @@ class MarketStreamClient < EM::Connection
   def process_message(msg)
     case msg[:type]
     when 'tick'
+      should_flush = false
       @buffer_mutex.synchronize do
         @buffer << msg
-        if @buffer.length >= 100 || (Time.now.to_f - @last_flush.to_f) >= Constants::BATCH_FLUSH_INTERVAL
-          flush_buffer
-        end
+        should_flush = @buffer.length >= 100 || (Time.now.to_f - @last_flush.to_f) >= Constants::BATCH_FLUSH_INTERVAL
       end
+      flush_buffer if should_flush
     when 'trade'
       @on_tick&.call(msg) if @on_tick
     when 'subscription_confirmed'
@@ -191,20 +294,34 @@ class MarketStreamClient < EM::Connection
   end
 
   def flush_buffer
-    # TODO: The flush is synchronous and blocks the reactor. For high-throughput
-    # scenarios (100k+ ticks/sec), this becomes a bottleneck. The fix is to
-    # write to a ring buffer and let a separate thread drain it. The ring buffer
-    # implementation is in `v2/lib/ring_buffer.rb` which doesn't exist yet.
-    # The ticket for this is V2-847. It's in the "Sprint Backlog" which means
-    # it's prioritized but nobody's picked it up yet. Because everyone's busy
-    # fixing the shit that v1 broke.
+    batch = nil
     @buffer_mutex.synchronize do
       return if @buffer.empty?
       batch = @buffer.dup
       @buffer.clear
       @last_flush = Time.now
-      Thread.new { @on_tick&.call(batch) }
     end
+    @flush_queue.push(batch)
+    $logger.warn "Dropped #{@flush_queue.dropped_batches} old tick batch(es) under backpressure" if @flush_queue.dropped_batches.positive?
+  end
+
+  def start_drain_worker
+    Thread.new do
+      Thread.current.name = 'market-stream-flush-drain' if Thread.current.respond_to?(:name=)
+      while (batch = @flush_queue.pop)
+        begin
+          @on_tick&.call(batch)
+        rescue StandardError => e
+          $logger.error "Tick drain worker error: #{e.message}"
+          @on_error&.call(e)
+        end
+      end
+    end
+  end
+
+  def shutdown_drain_worker
+    @flush_queue.close
+    @drain_worker&.join(2)
   end
 
   def send_json(obj)
@@ -266,10 +383,7 @@ class MarketStreamAPI < Sinatra::Base
   # Return recent ticks for an instrument
   get '/api/v2/market/ticks/:instrument' do
     content_type :json
-    # TODO: Actually store and serve historical ticks.
-    # Right now this returns an empty array. The v1 API did the same thing.
-    # So technically this is not a regression. It's feature parity.
-    { instrument: params[:instrument], ticks: [], count: 0 }.to_json
+    $tick_history.recent(params[:instrument], limit: params[:limit]).to_json
   end
 
   # Return service status
@@ -302,6 +416,7 @@ end
 
 $start_time = Time.now.utc
 $message_count = 0
+$tick_history = TickHistory.new
 
 def start_service
   EM.run do
@@ -315,6 +430,7 @@ def start_service
       ENV.fetch('INSTRUMENTS', 'BTC/USD,ETH/USD').split(','),
       ->(data) {
         $message_count += data.is_a?(Array) ? data.length : 1
+        $tick_history.record(data)
       },
       ->(error) {
         $logger.error "Market stream error: #{error.message}"
@@ -340,12 +456,64 @@ rescue StandardError => e
   exit 1
 end
 
+def run_tick_history_smoke
+  history = TickHistory.new(3)
+  history.record([
+    { instrument: 'BTC/USD', price: 100, sequence: 1 },
+    { instrument: 'ETH/USD', price: 200, sequence: 1 },
+    { instrument: 'BTC/USD', price: 101, sequence: 2 },
+    { instrument: 'BTC/USD', price: 102, sequence: 3 },
+    { instrument: 'BTC/USD', price: 103, sequence: 4 },
+  ])
+
+  btc = history.recent('BTC/USD', limit: 2)
+  eth = history.recent('ETH/USD')
+
+  raise "expected 2 BTC/USD ticks, got #{btc[:count]}" unless btc[:count] == 2
+  raise "expected bounded newest BTC/USD ticks" unless btc[:ticks].map { |tick| tick[:sequence] } == [3, 4]
+  raise "expected 1 ETH/USD tick, got #{eth[:count]}" unless eth[:count] == 1
+
+  puts JSON.generate({ status: 'ok', btc_count: btc[:count], eth_count: eth[:count] })
+end
+
+def run_flush_queue_smoke
+  queue = BoundedBatchQueue.new(2)
+  queue.push([{ sequence: 1 }])
+  queue.push([{ sequence: 2 }])
+  queue.push([{ sequence: 3 }])
+
+  first = queue.pop
+  second = queue.pop
+  raise "expected oldest batch to be dropped" unless first.first[:sequence] == 2
+  raise "expected newest batch to be retained" unless second.first[:sequence] == 3
+  raise "expected one dropped batch" unless queue.dropped_batches == 1
+
+  drained = []
+  drain_queue = BoundedBatchQueue.new(4)
+  worker = Thread.new do
+    while (batch = drain_queue.pop)
+      drained << batch.first[:sequence]
+    end
+  end
+  [10, 11, 12].each { |sequence| drain_queue.push([{ sequence: sequence }]) }
+  sleep 0.05
+  drain_queue.close
+  worker.join(2)
+  raise "expected drain worker to process queued batches in order" unless drained == [10, 11, 12]
+
+  puts JSON.generate({ status: 'ok', dropped_batches: queue.dropped_batches, drained: drained })
+end
+
 # ===─ CLI =========================================================================================================
 
 case ARGV.first
 when 'start'
   $logger.info "v2 MarketStream v#{V2_VERSION} (#{V2_BUILD})"
   start_service
+when 'smoke-tick-history'
+  run_tick_history_smoke
+when 'smoke-flush-queue'
+  run_flush_queue_smoke
 when 'stop'
   $logger.info "Stop requested. Sending SIGTERM to #{Process.pid}"
   Process.kill('TERM', Process.pid)

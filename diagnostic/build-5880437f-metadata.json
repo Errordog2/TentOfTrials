@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-06-20T03:13:12.318590+00:00",
+  "commit": "5880437f",
+  "diagnostic_logd": "diagnostic/build-5880437f.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "44bddaccb865a4f05405",
+  "decrypt_command": "encryptly unpack diagnostic/build-5880437f.logd <outdir> --password 44bddaccb865a4f05405",
+  "total_modules": 10,
+  "passed": 2,
+  "failed": 8,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "frontend",
+      "status": "PASS",
+      "elapsed_seconds": 6.829,
+      "artifact": "/tmp/clone-pr14/frontend/dist"
+    },
+    {
+      "name": "market",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "frailbox",
+      "status": "PASS",
+      "elapsed_seconds": 0.44,
+      "artifact": "/tmp/clone-pr14/frailbox/frailbox"
+    },
+    {
+      "name": "engine",
+      "status": "FAIL",
+      "elapsed_seconds": 0.044,
+      "artifact": null
+    },
+    {
+      "name": "compliance",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    },
+    {
+      "name": "openapi-tools",
+      "status": "FAIL",
+      "elapsed_seconds": 0,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-5880437f.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}

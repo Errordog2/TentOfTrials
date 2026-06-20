@@ -1,105 +1,76 @@
-import React, { Component, type ErrorInfo, type ReactNode } from 'react';
+import React from 'react';
+import { trackError } from '../services/telemetry';
 
 interface ErrorBoundaryProps {
-  children: ReactNode;
-  fallback?: ReactNode;
-  onError?: (error: Error, errorInfo: ErrorInfo) => void;
+  children: React.ReactNode;
+  fallbackTitle?: string;
+  fallback?: React.ReactNode;
+  onError?: (error: Error, errorInfo: React.ErrorInfo) => void;
 }
 
 interface ErrorBoundaryState {
-  hasError: boolean;
   error: Error | null;
 }
 
-class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  constructor(props: ErrorBoundaryProps) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = {
+    error: null,
+  };
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error };
+    return { error };
   }
 
-  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // Log to console for development — can be wired to production telemetry later
-    console.error('[ErrorBoundary] Caught render error:', error, errorInfo);
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
+    console.error('[ErrorBoundary] Unhandled render error', {
+      error,
+      componentStack: errorInfo.componentStack,
+    });
+
+    trackError(error, 'ErrorBoundary', ['react', 'render']);
     this.props.onError?.(error, errorInfo);
   }
 
   private handleRetry = (): void => {
-    this.setState({ hasError: false, error: null });
+    this.setState({ error: null });
   };
 
   private handleReload = (): void => {
     window.location.reload();
   };
 
-  render(): ReactNode {
-    if (this.state.hasError) {
-      return (
-        this.props.fallback ?? (
-          <div style={containerStyle}>
-            <div style={cardStyle}>
-              <h2 style={{ margin: '0 0 12px', fontSize: '20px', fontWeight: 600 }}>
-                Something went wrong
-              </h2>
-              <p style={{ margin: '0 0 20px', color: '#666', fontSize: '14px', lineHeight: 1.5 }}>
-                An unexpected error occurred while rendering this page.
-              </p>
-              <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
-                <button
-                  onClick={this.handleRetry}
-                  style={buttonStyle}
-                >
-                  Try Again
-                </button>
-                <button
-                  onClick={this.handleReload}
-                  style={{ ...buttonStyle, background: '#e2e8f0', color: '#333' }}
-                >
-                  Reload Page
-                </button>
-              </div>
-            </div>
-          </div>
-        )
-      );
+  render(): React.ReactNode {
+    if (!this.state.error) {
+      return this.props.children;
     }
 
-    return this.props.children;
+    if (this.props.fallback) {
+      return this.props.fallback;
+    }
+
+    return (
+      <section className="error-boundary" role="alert" aria-live="assertive">
+        <div className="error-boundary__panel">
+          <p className="error-boundary__eyebrow">Application error</p>
+          <h1 className="error-boundary__title">
+            {this.props.fallbackTitle ?? 'Something went wrong'}
+          </h1>
+          <p className="error-boundary__message">
+            The workspace hit an unexpected rendering problem. You can retry the
+            current view or reload the app.
+          </p>
+          <div className="error-boundary__actions">
+            <button className="btn btn-primary" type="button" onClick={this.handleRetry}>
+              Retry
+            </button>
+            <button className="btn btn-secondary" type="button" onClick={this.handleReload}>
+              Reload app
+            </button>
+          </div>
+        </div>
+      </section>
+    );
   }
 }
 
-const containerStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  minHeight: '100vh',
-  padding: '20px',
-  backgroundColor: '#f8f9fa',
-  boxSizing: 'border-box',
-};
-
-const cardStyle: React.CSSProperties = {
-  textAlign: 'center',
-  padding: '40px 48px',
-  maxWidth: '420px',
-  background: '#fff',
-  borderRadius: '12px',
-  boxShadow: '0 2px 12px rgba(0, 0, 0, 0.08)',
-};
-
-const buttonStyle: React.CSSProperties = {
-  padding: '10px 24px',
-  fontSize: '14px',
-  fontWeight: 500,
-  color: '#fff',
-  background: '#4f46e5',
-  border: 'none',
-  borderRadius: '8px',
-  cursor: 'pointer',
-};
-
 export default ErrorBoundary;
-export type { ErrorBoundaryProps, ErrorBoundaryState };

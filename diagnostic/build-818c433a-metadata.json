@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-06-19T08:06:36.585058+00:00",
+  "commit": "818c433a",
+  "diagnostic_logd": "diagnostic/build-818c433a.logd",
+  "chunked": false,
+  "chunk_size_bytes": null,
+  "password": "83f100f7d62cbe58bdcc",
+  "decrypt_command": "encryptly unpack diagnostic/build-818c433a.logd <outdir> --password 83f100f7d62cbe58bdcc",
+  "total_modules": 10,
+  "passed": 10,
+  "failed": 0,
+  "modules": [
+    {
+      "name": "backend",
+      "status": "PASS",
+      "elapsed_seconds": 0.184,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/backend/target"
+    },
+    {
+      "name": "frontend",
+      "status": "PASS",
+      "elapsed_seconds": 5.048,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/frontend/dist"
+    },
+    {
+      "name": "market",
+      "status": "PASS",
+      "elapsed_seconds": 0.738,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/market/market"
+    },
+    {
+      "name": "frailbox",
+      "status": "PASS",
+      "elapsed_seconds": 0.004,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/frailbox/frailbox"
+    },
+    {
+      "name": "engine",
+      "status": "PASS",
+      "elapsed_seconds": 0.144,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/frailbox/engine/build/trial-engine"
+    },
+    {
+      "name": "compliance",
+      "status": "PASS",
+      "elapsed_seconds": 0.684,
+      "artifact": "/home/coder/bounty/workspaces/tentoftrials-fork/compliance/build"
+    },
+    {
+      "name": "v2-market-stream",
+      "status": "PASS",
+      "elapsed_seconds": 0.014,
+      "artifact": null
+    },
+    {
+      "name": "nfc-scanner",
+      "status": "PASS",
+      "elapsed_seconds": 0.001,
+      "artifact": null
+    },
+    {
+      "name": "openapi-haskell",
+      "status": "PASS",
+      "elapsed_seconds": 3.855,
+      "artifact": null
+    },
+    {
+      "name": "openapi-tools",
+      "status": "PASS",
+      "elapsed_seconds": 0.003,
+      "artifact": null
+    }
+  ],
+  "pr_note": "Include this metadata and diagnostic/build-818c433a.logd in your PR. Maintainers may ask you to remove these diagnostic artifacts before merging."
+}
