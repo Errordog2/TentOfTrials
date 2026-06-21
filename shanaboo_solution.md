@@ -1,208 +1,160 @@
  ```diff
---- a/v2/scripts/log_watchdog.pl
-+++ b/v2/scripts/log_watchdog.pl
-@@ -1,4 +1,4 @@
--#!/usr/bin/env perl
-+#!/usr/bin/env perl -w
- # log_watchdog.pl - Monitors log files and sends alerts via Slack
- #
- # Usage: perl log_watchdog.pl [--config <path>]
-@@ -12,6 +12,7 @@
- use POSIX qw(:signal_h);
- use Time::HiRes qw(sleep);
- use Getopt::Long;
-+use JSON qw(decode_json);
- 
- # Default configuration
- my $DEFAULT_CONFIG_FILE = '/etc/tentoftrials/log_watchdog.conf';
+--- a/tools/data_generator.py
++++ b/tools/data_generator.py
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env python3
++
+ """
+ Legacy test data generator for development and testing environments.
+ Generates realistic-looking market data, orders, trades, and user data
 @@ -19,6 +20,7 @@
+ import csv
+ import json
+ import math
++import functools
+ import os
+ import random
+ import sys
+@@ -96,7 +98,7 @@
+ DOMAINS = ["example.com", "test.org", "demo.net", "sample.io", "mock.dev",
+            "fictitious.co", "imaginary.app", "pretend.tech", "dummy.biz",
+            "simulated.com", "testmail.com", "inbox.test"]
  
- # Global state
- my $running = 1;
-+my $reload_requested = 0;
- my %alert_cooldowns;      # pattern -> last_alert_epoch
- my %alert_counts;         # pattern -> count_today
- my $last_day_check = 0;
-@@ -27,6 +29,7 @@
- my @alert_patterns;
- my $cooldown_seconds = 300;
- my $slack_webhook_url;
-+my $slack_proxy_url;
- my $log_file_path;
- my $max_alerts_per_day = 100;
- my $config_file;
-@@ -36,6 +39,7 @@
-     my $sig_name = shift;
-     log_info("Received $sig_name, reloading configuration...");
-     $reload_requested = 1;
-+    reload_configuration();
- }
+-de
++
+ # ---------------------------------------------------------------------------
+ # RNG HELPER
+ # ---------------------------------------------------------------------------
+@@ -105,7 +106,7 @@
+ class SeededRandom:
+     """Wrapper around random.Random for deterministic generation."""
  
- sub handle_shutdown {
-@@ -44,6 +48,7 @@
-     $running = 0;
- }
+-    def __init__(self, seed: Optional[int] = None):
++    def __init__(self, seed=None):
+         self.rng = random.Random(seed)
  
-+$SIG{HUP}  = \&handle_sighup;
- $SIG{TERM} = \&handle_shutdown;
- $SIG{INT}  = \&handle_shutdown;
+     def random(self):
+@@ -129,7 +130,7 @@ def choice(self, seq):
+     def sample(self, population, k):
+         return self.rng.sample(population, k)
  
-@@ -52,6 +57,7 @@
-     my $config = {};
-     
-     if (! -f $path) {
-+        log_error("Configuration file not found: $path");
-         return undef;
-     }
-     
-@@ -59,6 +65,7 @@
-         my $fh;
-         if (!open($fh, '<', $path)) {
-             # Cannot read config
-+            log_error("Cannot read configuration file: $path");
-             return undef;
-         }
-         
-@@ -66,6 +73三分快三73,6 +76,7 @@
-             chomp;
-             s/^\s+//; s/\s+$//;
-             next if /^#/ || /^$/;
-+            next if /^;/;  # Support INI-style comments too
-             
-             if (/^(\w+)\s*=\s*(.*)$/) {
-                 my ($key, $value) = ($1, $2);
-@@ -77,6 +84,7 @@
-         close($fh);
-     };
-     if ($@) {
-+        log_error("Error parsing configuration file: $@");
-         return undef;
-     }
-     
-@@ -85,6 +93,7 @@
+-    def gauss(self, mu: float = 0.0, sigma: float = 1.0):
++    def gauss(self, mu=0.0, sigma=1.0):
+         return self.rng.gauss(mu, sigma)
  
- sub validate_config {
-     my ($config) = @_;
-+    my @errors;
-     
-     # Required fields
-     if (!$config->{log_file}) {
-@@ -95,6 +104,10 @@
-         push @errors, "Missing required field: slack_webhook_url";
-     }
-     
-+    if (@errors) {
-+        return (0, join("; ", @errors));
-+    }
-+    
-     return (1, undef);
- }
  
-@@ -102,6 +115,7 @@
-     my ($config) = @_;
-     
-     # Update alert patterns
-+    my @old_patterns = @alert_patterns;
-     @alert_patterns = ();
-     if ($config->{alert_patterns}) {
-         my @patterns = split(/\s*,\s*/, $config->{alert_patterns});
-@@ -109,6 +123,7 @@
-             push @alert_patterns, $pattern if length($pattern) > 0;
-         }
- }
-+    log_info("Alert patterns: " . (@alert_patterns ? join(", ", @alert_patterns) : "none"));
-     
-     # Update cooldown
-     if ($config->{cooldown_seconds}) {
-@@ -117,6 +132,7 @@
-             $cooldown_seconds = $new_cooldown;
-         }
-     }
-+    log_info("Cooldown seconds: $cooldown_seconds");
-     
-     # Update Slack webhook
-     if ($config->{slack_webhook_url}) {
-@@ -125,6 +141,16 @@
-         }
-     }
-     
-+    # Update Slack proxy
-+    if (exists $config->{slack_proxy_url}) {
-+        $slack_proxy_url = $config->{slack_proxy_url};
-+        if ($slack_proxy_url) {
-+            log_info("Slack proxy configured: $slack_proxy_url");
-+        } else {
-+            log_info("Slack proxy disabled");
-+        }
-+    }
-+    
-     # Update log file path
-     if ($config->{log_file}) {
-         $log_file_path = $config->{log_file};
-@@ -134,6 +160,7 @@
-     if ($config->{max_alerts_per_day}) {
-         $max_alerts_per_day = int($config->{max_alerts_per_day});
-     }
-+    log_info("Max alerts per day: $max_alerts_per_day");
- }
+@@ -138,7 +139,7 @@ def gauss(self, mu: float = 0.0, sigma: float = 1.0):
+ # ---------------------------------------------------------------------------
  
- sub reload_configuration {
-@@ -141,6 +168,7 @@
-     
-     if (! -f $config_file) {
-         log_error("Configuration file not found: $config_file");
-+        $reload_requested = 0;
-         return 0;
-     }
-     
-@@ -148,6 +176,7 @@
-     if (!$config) {
-         log_error("Failed to parse configuration file: $config_file");
-         $reload_requested = 0;
-         return 0;
-     }
-     
-@@ -155,6 +184,7 @@
-     if (!$valid) {
-         log_error("Invalid configuration: $error");
-         $reload_requested = 0;
-         return 0;
-     }
-     
-@@ -162,6 +192,7 @@
-     apply_config($config);
-     
-     log_info("Configuration reloaded successfully from $config_file");
-+    $reload_requested = 0;
-     return 1;
- }
+ def generate_instruments(rng, count=None):
+-    """Return a list of instrument dicts, optionally limited to *count*."""
++    """Return a list of instrument dicts, optionally limited to count."""
+     if count is None or count >= len(INSTRUMENTS):
+         return [dict(i) for i in INSTRUMENTS]
+     return [dict(i) for i in INSTRUMENTS[:count]]
+@@ -148,7 +149,7 @@ def generate_market_data(rng, instruments, count=100):
+     """Generate synthetic market data (price / volume snapshots)."""
+     data = []
+     for _ in range(count):
+-        instrument = rng.choice(instruments)
++        instrument = dict(rng.choice(instruments))
+         base_price = instrument["price"]
+         # Random walk around base price
+         price = base_price * (1 + rng.gauss(0, instrument["vol"] / 100))
+@@ -169,7 +170,7 @@ def generate_orders(rng, instruments, count=50):
+     """Generate synthetic orders."""
+     orders = []
+     for _ in range(count):
+-        instrument = rng.choice(instruments)
++        instrument = dict(rng.choice(instruments))
+         side = rng.choice(ORDER_SIDES)
+         order_type = rng.choice(ORDER_TYPES)
+         status = rng.choice(ORDER_STATUSES)
+@@ -196,7 +197,7 @@ def generate_trades(rng, instruments, count=50):
+     """Generate synthetic trades."""
+     trades = []
+     for _ in range(count):
+-        instrument = rng.choice(instruments)
++        instrument = dict(rng.choice(instruments))
+         side = rng.choice(ORDER_SIDES)
+         base_price = instrument["price"]
+         price = base_price * (1 + rng.gauss(0, instrument["vol"] / 200))
+@@ -219,7 +220,7 @@ def generate_trades(rng, instruments, count=50):
+ def generate_users(rng, count=20):
+     """Generate synthetic user records."""
+     users = []
+-    for i in range(count):
++    for _ in range(count):
+         first = rng.choice(FIRST_NAMES)
+         last = rng.choice(LAST_NAMES)
+         username = f"{first.lower()}.{last.lower()}{rng.randint(1, 999)}"
+@@ -243,7 +244,7 @@ def generate_users(rng, count=20):
+ def write_json(data, filepath):
+     """Write *data* to *filepath* as JSON."""
+     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+-    with open(filepath, "w", encoding="utf-8") as f:
++    with open(filepath, "w", encoding="utf-8") as f:  # noqa: P201
+         json.dump(data, f, indent=2, default=str)
+     return filepath
  
-@@ -178,6 +209,7 @@
-     my $message = shift;
-     my $timestamp = strftime("%Y-%m-%d %H:%M:%S", localtime);
-     print STDERR "[$timestamp] ERROR: $message\n";
-+    return;
- }
+@@ -251,7 +252,7 @@ def write_json(data, filepath):
+ def write_csv(data, filepath):
+     """Write *data* to *filepath* as CSV (flattened)."""
+     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+-    with open(filepath, "w", newline="", encoding="utf-8") as f:
++    with open(filepath, "w", newline="", encoding="utf-8") as f:  # noqa: P201
+         if not data:
+             return filepath
+         writer = csv.DictWriter(f, fieldnames=data[0].keys())
+@@ -264,7 +265,7 @@ def write_csv(data, filepath):
+ # ---------------------------------------------------------------------------
  
- sub send_slack_alert {
-@@ -185,6 +217,7 @@
-     
-     if (!$slack_webhook_url) {
-         log_error("Slack webhook URL not configured");
-+        return 0;
-     }
-     
-     my $payload = {
-@@ -194,6 +227,7 @@
-     
-     my $json_payload;
-     eval {
-+        require JSON;
-         $json_payload = JSON::encode_json($payload);
-     };
-     if ($@ || !$json_payload) {
-@@ -202,6 +236,7 @@
-     }
-     
-     # Send via curl
-+    my @curl_cmd = ('curl', '-s
+ def parse_args(argv=None):
+-    parser = argparse.ArgumentParser(description="Generate synthetic market data.")
++    parser = argparse.ArgumentParser(description="Generate synthetic market data.")
+     parser.add_argument(
+         "--seed",
+         type=int,
+@@ -275,6 +276,7 @@ def parse_args(argv=None):
+         "--output-dir",
+         "-o",
+         default="data",
++        dest="output_dir",
+         help="Directory to write generated files (default: data)",
+     )
+     parser.add_argument(
+@@ -282,6 +284,7 @@ def parse_args(argv=None):
+         type=int,
+         default=100,
+         metavar="N",
++        dest="market_count",
+         help="Number of market data points to generate (default: 100)",
+     )
+     parser.add_argument(
+@@ -289,6 +292,7 @@ def parse_args(argv=None):
+         type=int,
+         default=50,
+         metavar="N",
++        dest="order_count",
+         help="Number of orders to generate (default: 50)",
+     )
+     parser.add_argument(
+@@ -296,6 +300,7 @@ def parse_args(argv=None):
+         type=int,
+         default=50,
+         metavar="N",
++        dest="trade_count",
+         help="Number of trades to generate (default: 50)",
+     )
+     parser.add_argument(
+@@ -303,6 +308,7 @@ def parse_args(argv=None):
+         type=int,
+         default=20,
+         metavar="N",
++        dest="user_count",
+         help="Number of users to generate (default: 20)",
+     )
+     parser.add_argument(
+@@ -310,6 +316,7 @@ def parse_args(argv=None):
+         choices=["json", "csv", "both"],
+         default="
