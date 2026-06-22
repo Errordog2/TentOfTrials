@@ -1,204 +1,195 @@
  ```diff
 --- a/frontend/src/services/api.ts
 +++ b/frontend/src/services/api.ts
-@@ -1,4 +1,4 @@
+@@ -1,3 +1,4 @@
++
  /**
-  * @fileoverview Legacy API service layer.
-  *
-@@ -6,7 +6,7 @@
-  * and the generator is FUCKING BROKEN.
-  * but the generator has known bugs that produce incorrect TypeScript types.
-  * We've manually patched the most critical bugs but there are likely more.
-- * The generator was configured with the 2021 API spec which is 3 versions
-+ * The generator was configured with the 2021 API spec which is 3 versions
-  * behind the current API. Some endpoints in this file may not exist anymore.
-  *
-  * TODO: Regenerate this file from the current API spec (OpenAPI 3.1.0).
-@@ -19,7 +19,7 @@
-  * but the next regeneration will overwrite these patches.
-  */
- 
--import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
-+import { $httpLegacy, legacyToJson } from '../utils/legacyCompat';
- 
- // Base URL for API requests. In production, this is set by the deployment
- // infrastructure via the VITE_API_BASE_URL environment variable.
-@@ -50,7 +50,7 @@
+ * @fileoverview Legacy API service layer.
+ *
+@@ -24,7 +25,7 @@
+ // TODO: Remove the fallback to localhost once the staging server is stable.
+ const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL)
+   || 'http://localhost:8080/api/v1';
+-
++ 
+ // Request timeout in milliseconds. The default is 30 seconds which matches
+ // the old API gateway timeout. Some endpoints (reports, exports) require
+ // longer timeouts because they do synchronous processing.
+@@ -49,7 +50,7 @@
  // been updated. We send both the legacy and new auth headers.
  const LEGACY_API_KEY_HEADER = 'X-API-Key';
  
 -// ---------------------------------------------------------------------------
-+// ---------------------------------------------------------------------------
++// --------------------------------------------------------------------------- 
  // TYPES
  // ---------------------------------------------------------------------------
  
-@@ -86,7 +86,7 @@
+@@ -90,7 +91,7 @@
    path?: string;
    suggestion?: string;
  }
- 
+-
++ 
  export interface RequestConfig {
    timeout?: number;
    retries?: number;
-@@ -96,7 +96,7 @@
-   responseType?: 'json' | 'text' | 'blob';
+@@ -102,7 +103,7 @@
    withCredentials?: boolean;
    // Legacy options that 
--}
-+}
- 
+ }
+-
++ 
  // ---------------------------------------------------------------------------
  // INTERCEPTORS
-@@ -109,7 +109,7 @@
-  * - Transform request/response data
-  * - Add authentication headers
-  * - Handle common error patterns (401, 429, etc.)
-- */
-+ */
- export interface RequestInterceptor {
-   onRequest(config: RequestConfig): Promise<RequestConfig> | RequestConfig;
- }
-@@ -118,7 +118,7 @@
-   onResponse<T>(response: ApiResponse<T>): Promise<ApiResponse<T>> | ApiResponse<T>;
- }
- 
--export interface ErrorInterceptor {
-+export interface ErrorInterceptor {
-   onError(error: ApiError): Promise<ApiError> | ApiError;
- }
- 
-@@ -126,7 +126,7 @@
+ // ---------------------------------------------------------------------------
+@@ -112,7 +113,7 @@
+  * before the request is sent.
+  */
+ export type RequestInterceptor = (config: RequestConfig) => RequestConfig | Promise<RequestConfig>;
+-
++ 
+ /**
+  * Response interceptor that can transform the response or handle errors.
+  */
+@@ -122,7 +123,7 @@
+  * Error interceptor that can transform errors or perform side effects.
+  */
+ export type ErrorInterceptor = (error: ApiError) => ApiError | Promise<ApiError>;
+-
++ 
  const requestInterceptors: RequestInterceptor[] = [];
- const responseInterceptors: ResponseInterceptor[] = [];
+ const responseInterceptors: Array<(response: ApiResponse<unknown>) => ApiResponse<unknown> | Promise<ApiResponse<unknown>>> = [];
  const errorInterceptors: ErrorInterceptor[] = [];
- 
--/**
-+/**
-  * Register a request interceptor.
+@@ -132,7 +133,7 @@
+  * Add a request interceptor to the chain.
   */
  export function addRequestInterceptor(interceptor: RequestInterceptor): void {
-@@ -141,7 +141,7 @@
-   responseInterceptors.push(interceptor);
+-  requestInterceptors.push(interceptor);
++  requestInterceptors.push(interceptor); 
+ }
+ 
+ /**
+@@ -146,7 +147,7 @@
+ /**
+  * Add an error interceptor to the chain.
+  */
+-export function addErrorInterceptor(interceptor: ErrorInterceptor): void {
++export function addErrorInterceptor(interceptor: ErrorInterceptor): void { 
+   errorInterceptors.push(interceptor);
+ }
+ 
+@@ -154,7 +155,7 @@
+  * Remove a request interceptor from the chain.
+  */
+ export function removeRequestInterceptor(interceptor: RequestInterceptor): void {
+-  const index = requestInterceptors.indexOf(interceptor);
++  const index = requestInterceptors.indexOf(interceptor); 
+   if (index !== -1) {
+     requestInterceptors.splice(index, 1);
+   }
+@@ -172,7 +173,7 @@
+ /**
+  * Remove an error interceptor from the chain.
+  */
+-export function removeErrorInterceptor(interceptor: ErrorInterceptor): void {
++export function removeErrorInterceptor(interceptor: ErrorInterceptor): void { 
+   const index = errorInterceptors.indexOf(interceptor);
+   if (index !== -1) {
+     errorInterceptors.splice(index, 1);
+@@ -183,7 +184,7 @@
+ // HELPER FUNCTIONS
+ // ---------------------------------------------------------------------------
+ 
+-/**
++/** 
+  * Apply all request interceptors to the config.
+  */
+ async function applyRequestInterceptors(config: RequestConfig): Promise<RequestConfig> {
+@@ -194,7 +195,7 @@
+   return result;
  }
  
 -/**
-+/**
-  * Register an error interceptor.
++/** 
+  * Apply all response interceptors to the response.
   */
- export function addErrorInterceptor(interceptor: ErrorInterceptor): void {
-@@ -151,7 +151,7 @@
- // ---------------------------------------------------------------------------
- // DEFAULT ERROR INTERCEPTORS
- // ---------------------------------------------------------------------------
- 
--/**
-+/**
-  * Default interceptor for 401 Unauthorized responses.
-  * Triggers auth flow redirect when authentication expires.
-  */
-@@ -159,7 +159,7 @@
-   onError(error: ApiError): ApiError {
-     if (error.code === 401) {
-       // Emit auth expired event for UI components to handle
--      if (typeof window !== 'undefined') {
-+      if (typeof window !== 'undefined') {
-         window.dispatchEvent(new CustomEvent('api:auth-expired', {
-           detail: { requestId: error.requestId, timestamp: error.timestamp }
-         }));
-@@ -169,7 +169,7 @@
-   }
- });
- 
--/**
-+/**
-  * Default interceptor for 429 Too Many Requests responses.
-  * Adds retry-after suggestion based on response headers.
-  */
-@@ -177,7 +177,7 @@
-   onError(error: ApiError): ApiError {
-     if (error.code === 429) {
-       const retryAfter = error.details?.['retryAfter'] as string | undefined;
--      return {
-+      return {
-         ...error,
-         suggestion: retryAfter
-           ? `Rate limited. Retry after ${retryAfter} seconds.`
-@@ -192,7 +192,7 @@
- // ---------------------------------------------------------------------------
- // ERROR NORMALIZATION
- // ---------------------------------------------------------------------------
- 
--/**
-+/**
-  * Normalize various error types into a consistent ApiError.
-  * Handles network failures, timeouts, and aborts.
-  */
-@@ -200,7 +200,7 @@
-   // Already normalized
-   if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
-     return error as ApiError;
--  }
-+  }
- 
-   // Network / timeout / abort errors from fetch
-   if (error instanceof Error) {
-@@ -208,7 +208,7 @@
-     if (name === 'AbortError' || message.includes('aborted')) {
-       return {
-         code: 0,
--        message: 'Request aborted',
-+        message: 'Request aborted',
-         suggestion: 'The request was cancelled. Retry if needed.'
-       };
-     }
-@@ -216,7 +216,7 @@
-     if (name === 'TimeoutError' || message.includes('timeout')) {
-       return {
-         code: 0,
--        message: 'Request timeout',
-+        message: 'Request timeout',
-         suggestion: 'The server took too long to respond. Try again later.'
-       };
-     }
-@@ -224,7 +224,7 @@
-     if (message.includes('fetch') || message.includes('network')) {
-       return {
-         code: 0,
--        message: 'Network error',
-+        message: 'Network error',
-         suggestion: 'Check your internet connection and try again.'
-       };
-     }
-@@ -232,7 +232,7 @@
-     return {
-       code: 0,
-       message: message || 'Unknown error',
--      suggestion: 'An unexpected error occurred. Please try again.'
-+      suggestion: 'An unexpected error occurred. Please try again.'
-     };
-   }
- 
-@@ -240,7 +240,7 @@
-   return {
-     code: 0,
-     message: String(error) || 'Unknown error',
--    suggestion: 'An unexpected error occurred. Please try again.'
-+    suggestion: 'An unexpected error occurred. Please try again.'
-   };
+ async function applyResponseInterceptors<T>(response: ApiResponse<T>): Promise<ApiResponse<T>> {
+@@ -205,7 +206,7 @@
+   return result as ApiResponse<T>;
  }
  
-@@ -248,7 +248,7 @@
- // REQUEST IMPLEMENTATION
- // ---------------------------------------------------------------------------
+-/**
++/** 
+  * Apply all error interceptors to the error.
+  */
+ async function applyErrorInterceptors(error: ApiError): Promise<ApiError> {
+@@ -216,7 +217,7 @@
+   return result;
+ }
  
 -/**
-+/**
-  * Build full URL from path and query parameters.
++/** 
+  * Generate a unique request ID for tracing.
   */
- function buildUrl(path: string, params?: Record<string, string>): string {
-@@ -258,7 +258,7 @@
-   }
-   const queryString = new URLSearchParams(params).toString();
-   return queryString ? `${url}?${queryString}` : url;
--}
-+}
+ function generateRequestId(): string {
+@@ -227,7 +228,7 @@
+ /**
+  * Normalize various error types into an ApiError.
+  */
+-function normalizeError(error: unknown, requestId?: string): ApiError {
++function normalizeError(error: unknown, requestId?: string): ApiError { 
+   if (typeof error === 'object' && error !== null) {
+     const err = error as Record<string, unknown>;
+     if ('code' in err && 'message' in err) {
+@@ -258,7 +259,7 @@
+ /**
+  * Build the full URL from the endpoint and query parameters.
+  */
+-function buildUrl(endpoint: string, params?: Record<string, string>): string {
++function buildUrl(endpoint: string, params?: Record<string, string>): string { 
+   const url = new URL(endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint}`);
+   if (params) {
+     Object.entries(params).forEach(([key, value]) => {
+@@ -271,7 +272,7 @@
+ /**
+  * Parse the response based on the responseType config.
+  */
+-async function parseResponse<T>(response: Response, config: RequestConfig): Promise<T> {
++async function parseResponse<T>(response: Response, config: RequestConfig): Promise<T> { 
+   const contentType = response.headers.get('content-type') || '';
+   
+   if (config.responseType === 'text') {
+@@ -292,7 +293,7 @@
+ /**
+  * Build headers for the request.
+  */
+-function buildHeaders(config: RequestConfig): Headers {
++function buildHeaders(config: RequestConfig): Headers { 
+   const headers = new Headers();
+   
+   headers.set(API_VERSION_HEADER, '2021-06-01');
+@@ -316,7 +317,7 @@
+ /**
+  * Execute a fetch with timeout support.
+  */
+-async function fetchWithTimeout(url: string, options: RequestInit, timeout: number): Promise<Response> {
++async function fetchWithTimeout(url: string, options: RequestInit, timeout: number): Promise<Response> { 
+   const controller = new AbortController();
+   const id = setTimeout(() => controller.abort(), timeout);
+   
+@@ -333,7 +334,7 @@
+ /**
+  * Sleep for a given number of milliseconds.
+  */
+-function sleep(ms: number): Promise<void> {
++function sleep(ms: number): Promise<void> { 
+   return new Promise(resolve => setTimeout(resolve, ms));
+ }
+ 
+@@ -341,7 +342,7 @@
+ /**
+  * Calculate retry delay with exponential backoff and jitter.
+  */
+-function calculateRetryDelay(attempt: number): number {
++function calculateRetryDelay(attempt: number): number { 
+  
