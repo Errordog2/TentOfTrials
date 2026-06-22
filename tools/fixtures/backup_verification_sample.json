@@ -1,0 +1,39 @@
+# Fix for Issue #3: [$50 BOUNTY] [Python/Ops] Automate backup restore integrity verification
+
+{
+  "description": "Sample backup verification specification for staging restores",
+  "version": "1.0",
+  "tables": {
+    "users": {
+      "expected_count": 1500,
+      "description": "User accounts table"
+    },
+    "sessions": {
+      "expected_count": 8500,
+      "description": "Active and recent sessions"
+    },
+    "audit_logs": {
+      "expected_count": 45000,
+      "description": "System audit trail"
+    },
+    "configurations": {
+      "expected_count": 25,
+      "description": "System configuration entries"
+    },
+    "permissions": {
+      "expected_count": 120,
+      "description": "Role and permission mappings"
+    }
+  },
+  "sample_data": {
+    "_comment": "Sample data for dry-run mode demonstrations",
+    "existing_tables": ["users", "sessions", "audit_logs", "configurations", "permissions", "cache_entries"],
+    "table_counts": {
+      "users": 1500,
+      "sessions": 8500,
+      "audit_logs": 45000,
+      "configurations": 25,
+      "permissions": 120
+    }
+  }
+}
