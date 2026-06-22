@@ -1,0 +1,33 @@
+# Fix for Issue #3: [$50 BOUNTY] [Python/Ops] Automate backup restore integrity verification
+
+{
+  "description": "Sample specification demonstrating verification failures",
+  "version": "1.0",
+  "tables": {
+    "users": {
+      "expected_count": 1500,
+      "description": "User accounts table"
+    },
+    "sessions": {
+      "expected_count": 8500,
+      "description": "Active and recent sessions"
+    },
+    "audit_logs": {
+      "expected_count": 45000,
+      "description": "System audit trail"
+    },
+    "missing_table": {
+      "expected_count": 100,
+      "description": "This table will be missing in sample data"
+    }
+  },
+  "sample_data": {
+    "_comment": "Sample data showing failures: missing table and count mismatch",
+    "existing_tables": ["users", "sessions", "audit_logs"],
+    "table_counts": {
+      "users": 1200,
+      "sessions": 8500,
+      "audit_logs": 45000
+    }
+  }
+}
