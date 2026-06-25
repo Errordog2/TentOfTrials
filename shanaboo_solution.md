@@ -1,7 +1,7 @@
  ```diff
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
-@@ -14,6 +14,7 @@
+@@ -12,6 +12,7 @@
  import argparse
  import json
  import os
@@ -9,7 +9,7 @@
  import socket
  import ssl
  import subprocess
-@@ -21,6 +22,7 @@
+@@ -19,6 +20,7 @@
  import time
  from datetime import datetime
  from typing import Any, Dict, List, Optional, Tuple
@@ -17,166 +17,127 @@
  
  # ---------------------------------------------------------------------------
  # CONSTANTS
-@@ -148,6 +150,7 @@
+@@ -118,6 +120,9 @@ def check_disk_space() -> Tuple[str, str, Dict[str, Any]]:
+ 
  def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
-     """
-     Check system memory usage by reading /proc/meminfo on Linux.
-+    Falls back to psutil or os-based methods on non-Linux platforms.
-     Returns (status, detail, diagnostics)
-     """
+     """Check system memory usage."""
++    if platform.system() == "Linux":
++        return _check_memory_usage_linux()
++    
      try:
-@@ -186,9 +189,63 @@
-             "swap_total_kb": swap_total,
-             "swap_used_kb": swap_used,
-         }
-+        return status, detail, diagnostics
-     except FileNotFoundError:
--        return "WARNING", "/proc/meminfo not available", {}
-+        pass
-     except Exception as e:
--        return "WARNING", f"Error reading memory info: {e}", {}
-+        return "WARNING", f"Error reading /proc/meminfo: {e}", {}
-+
-+    # Fallback for non-Linux platforms
+         with open("/proc/meminfo", "r") as f:
+             meminfo = f.read()
+@@ -145,9 +150,77 @@ def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
+         return "CRITICAL", f"Failed to read memory info: {e}", {}
+ 
+ 
++def _check_memory_usage_linux() -> Tuple[str, str, Dict[str, Any]]:
++    """Linux-specific memory check using /proc/meminfo."""
 +    try:
-+        # Try psutil first (commonly available)
++        with open("/proc/meminfo", "r") as f:
++            meminfo = f.read()
++        
++        mem_total = 0
++        mem_available = 0
++        
++        for line in meminfo.splitlines():
++            if line.startswith("MemTotal:"):
++                mem_total = int(line.split()[1]) * 1024
++            elif line.startswith("MemAvailable:"):
++                mem_available = int(line.split()[1]) * 1024
++        
++        if mem_total == 0:
++            return "WARNING", "Could not determine total memory", {}
++        
++        mem_used = mem_total - mem_available
++        percent_used = (mem_used / mem_total) * 100 if mem_total > 0 else 0
++        
++        detail = f"Memory usage: {percent_used:.1f}% ({mem_used // (1024*1024)}MB / {mem_total // (1024*1024)}MB)"
++        
++        if percent_used >= MEMORY_THRESHOLD_CRITICAL:
++            return "CRITICAL", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
++        elif percent_used >= MEMORY_THRESHOLD_WARNING:
++            return "WARNING", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
++        else:
++            return "OK", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
++    except Exception as e:
++        return "CRITICAL", f"Failed to read memory info: {e}", {}
++
++
++def _check_memory_usage_psutil() -> Tuple[str, str, Dict[str, Any]]:
++    """Fallback memory check using psutil if available."""
++    try:
 +        import psutil
 +        mem = psutil.virtual_memory()
-+        swap = psutil.swap_memory()
-+
-+        mem_percent = mem.percent
-+        mem_used = mem.used // 102  # Convert to KB approximation
-+        mem_total = mem.total // 1024  # Convert to KB
-+
-+        swap_total = swap.total // 1024
-+        swap_used = swap.used // 1024
-+
-+        if mem_percent >= MEMORY_THRESHOLD_CRITICAL:
-+            status = "CRITICAL"
-+        elif mem_percent >= MEMORY_THRESHOLD_WARNING:
-+            status = "WARNING"
++        percent_used = mem.percent
++        mem_total = mem.total
++        mem_available = mem.available
++        mem_used = mem.used
++        
++        detail = f"Memory usage: {percent_used:.1f}% ({mem_used // (1024*1024)}MB / {mem_total // (1024*1024)}MB)"
++        
++        if percent_used >= MEMORY_THRESHOLD_CRITICAL:
++            return "CRITICAL", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
++        elif percent_used >= MEMORY_THRESHOLD_WARNING:
++            return "WARNING", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
 +        else:
-+            status = "OK"
-+
-+        detail = f"Memory {mem_percent:.1f}% used ({mem_used // 1024}MB / {mem_total // 1024}MB)"
-+
-+        diagnostics = {
-+            "mem_percent": mem_percent,
-+            "mem_used_kb": mem_used,
-+            "mem_total_kb": mem_total,
-+            "swap_total_kb": swap_total,
-+            "swap_used_kb": swap_used,
-+            "source": "psutil",
-+        }
-+        return status, detail, diagnostics
++            return "OK", detail, {"percent_used": percent_used, "total": mem_total, "available": mem_available}
 +    except ImportError:
-+        pass
++        return "WARNING", "psutil not available for memory check", {}
 +
-+    # Final fallback using os-level information
-+    try:
-+        # Use sysctl on macOS/BSD
-+        result = subprocess.run(
-+            ["sysctl", "-n", "hw.memsize"],
-+            capture_output=True,
-+            text=True,
-+            timeout=5,
-+        )
-+        if result.returncode == 0:
-+            total_bytes = int(result.stdout.strip())
-+            total_kb = total_bytes // 1024
-+            # We can't easily get used memory without more complex tools
-+            return "WARNING", f"Memory check limited on {platform.system()}: total {total_kb // 1024}MB (install psutil for full stats)", {
-+                "mem_total_kb": total_kb,
-+                "source": "sysctl",
-+            }
-+    except Exception:
-+        pass
 +
-+    return "WARNING", f"Memory check unavailable on {platform.system()} (install psutil for full support)", {}
- 
- 
  def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
-@@ -196,7 +253,7 @@
-     Check system load average.
-     Returns (status, detail, diagnostics)
-     """
--    # Try /proc/loadavg first (Linux)
-+    # Try /proc/loadavg first (Linux native)
+     """Check system load average."""
++    # Try /proc/loadavg first (Linux)
++    if platform.system() == "Linux":
++        return _check_load_average_proc()
++    
++    # Fallback to os.getloadavg() for other platforms
++    return _check_load_average_os()
++
++
++def _check_load_average_proc() -> Tuple[str, str, Dict[str, Any]]:
++    """Check load average using /proc/loadavg (Linux-specific)."""
      try:
          with open("/proc/loadavg", "r") as f:
-             load_data = f.read().strip().split()
-@@ -213,9 +270,34 @@
-             "load_15m": load_15m,
-         }
-         return status, detail, diagnostics
--    except FileNotFoundError:
--        return "WARNING", "/proc/loadavg not available", {}
-     except Exception as e:
-+        # If /proc/loadavg fails for any reason, try fallback
-+        pass
-+
-+    # Fallback to os.getloadavg() (POSIX standard, works on macOS, Linux, etc.)
+             loadavg = f.read().strip().split()
+@@ -168,6 +241,36 @@ def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
+         return "WARNING", f"Failed to read load average: {e}", {}
+ 
+ 
++def _check_load_average_os() -> Tuple[str, str, Dict[str, Any]]:
++    """Check load average using os.getloadavg() (cross-platform fallback)."""
 +    try:
-+        load_1m, load_5m, load_15m = os.getloadavg()
-+
-+        # Determine status based on 1-minute load
-+        # Use CPU count as reference if available
++        load1, load5, load15 = os.getloadavg()
++        
++        # Try to get CPU count for normalization
 +        try:
 +            cpu_count = os.cpu_count() or 1
-+            load_ratio = load_1m / cpu_count
 +        except Exception:
-+            load_ratio = load_1m
-+
-+        if load_ratio >= 2.0:
-+            status = "CRITICAL"
-+        elif load_ratio >= 1.0:
-+            status = "WARNING"
++            cpu_count = 1
++        
++        # Normalize load by CPU count for threshold comparison
++        normalized_load = load1 / cpu_count if cpu_count > 0 else load1
++        
++        detail = f"Load average (1min): {load1:.2f} (cpus: {cpu_count})"
++        
++        # Use same thresholds as proc-based check (normalized)
++        if normalized_load >= 2.0:
++            return "CRITICAL", detail, {"load1": load1, "load5": load5, "load15": load15, "cpus": cpu_count}
++        elif normalized_load >= 1.0:
++            return "WARNING", detail, {"load1": load1, "load5": load5, "load15": load15, "cpus": cpu_count}
 +        else:
-+            status = "OK"
++            return "OK", detail, {"load1": load1, "load5": load5, "load15": load15, "cpus": cpu_count}
++    except OSError:
+ OS-specific functionality like os.getloadavg() is not available on Windows, but works on macOS and most Unix-like systems. We should handle this gracefully.
++        return "WARNING", "Load average not available on this platform", {}
++    except Exception as e:
++        return "WARNING", f"Failed to get load average: {e}", {}
 +
-+        detail = f"Load average: {load_1m:.2f} {load_5m:.2f} {load_15m:.2f} (fallback)"
 +
-+        diagnostics = {
-+            "load_1m": load_1m,
-+            "load_5m": load_5m,
-+            "load_15m": load_15m,
-+            "source": "os.getloadavg",
-+        }
-+        return status, detail, diagnostics
-+    except (AttributeError, OSError) as e:
-         return "WARNING", f"Load average check unavailable: {e}", {}
- 
- 
-@@ -223,6 +305,7 @@
-     """
-     Check disk usage for the root filesystem.
-     """
-+    # Linux path
-     try:
-         stat = os.statvfs("/")
-         total = stat.f_blocks * stat.f_frsize
-@@ -240,6 +323,7 @@
-             "disk_used_percent": percent,
-         }
-         return status, detail, diagnostics
-+    # Fallback for Windows or other platforms
-     except Exception as e:
-         return "WARNING", f"Disk check error: {e}", {}
- 
-@@ -247,6 +331,7 @@
+ # ---------------------------------------------------------------------------
  # MAIN
  # ---------------------------------------------------------------------------
- 
-+
- def run_all_checks(args) -> Dict[str, Any]:
-     results = {
-         "timestamp": datetime.utcnow().isoformat() + "Z",
-@@ -332,6 +417,7 @@
-         print(f"  {check_name:20s} {status:8s} {detail}")
-     print(f"\nOverall: {overall_status}")
- 
-+
- def main():
-     parser = argparse.ArgumentParser(description="Tent of Trials Health Check")
+@@ -245,6 +348,7 @@ def main():
      parser.add_argument("--service", help="Check specific service")
-@@ -358,5 +444
+     parser.add_argument("--json", action
