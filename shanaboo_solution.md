@@ -1,179 +1,190 @@
  ```diff
---- a/tools/verify_backup.py
-+++ b/tools/verify_backup.py
-@@ -0,0 +1,293 @@
-+#!/usr/bin/env python3
-+"""
-+Backup verification helper for TentOfTrials.
+--- a/build.py
++++ b/build.py
+@@ -1,4 +1,5 @@
+ #!/usr/bin/env python3
++# -*- coding: utf-8 -*-
+ 
+ import argparse
+ import datetime
+@@ -9,6 +10,7 @@
+ import shutil
+ import subprocess
+ import sys
++import tempfile
+ import time
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -17,6 +19,7 @@
+ ROOT = Path(__file__).resolve().parent
+ DIAGNOSTIC_DIR = ROOT / "diagnostic"
+ DIAGNOSTIC_CHUNK_SIZE = 40 * 1024 * 1024
++DIAGNOSTIC_PASSWORD = "tent-of-trials-diag"
+ 
+ 
+ def current_commit_id() -> str:
+@@ -34,6 +37,7 @@
+     return "00000000"
+ 
+ 
 +
-+Validates a restored database snapshot or exported metadata against expected
-+table names and row counts. Reports missing tables and row-count mismatches
-+with a non-zero exit code.
+ def diagnostic_paths_for_commit() -> tuple[Path, Path, str]:
+     """Return stable diagnostic artifact paths under diagnostic/ for the current commit."""
+     DIAGNOSTIC_DIR.mkdir(parents=True, exist_ok=True)
+@@ -43,6 +47,7 @@
+     return logd_path, metadata_path, commit_id
+ 
+ 
 +
-+Usage:
-+    # Validate against a live database
-+    python3 tools/verify_backup.py --expected expected.json --dsn "postgresql://user:pass@host/db"
+ def split_diagnostic_logd(logd_path: Path, chunk_size: int = DIAGNOSTIC_CHUNK_SIZE) -> list[Path]:
+     """Split an oversized .logd into numbered .logd chunks and remove the original."""
+     if logd_path.stat().st_size <= chunk_size:
+@@ -64,6 +69,7 @@
+     return chunks
+ 
+ 
 +
-+    # Dry-run / sample mode (no database credentials needed)
-+    python3 tools/verify_backup.py --expected expected.json --dry-run
+ @dataclass
+ class Module:
+     name: str
+@@ -74,6 +80,7 @@
+     build_dir: Optional[Path] = None
+     env: Optional[dict[str, str]] = None
+ 
 +
-+    # Generate sample expected.json
-+    python3 tools/verify_backup.py --generate-sample > sample_expected.json
-+"""
+ MODULES = [
+     Module(
+         name="backend",
+@@ -118,7 +125,8 @@
+         name="v2-market-stream",
+         language="Ruby",
+         dir=ROOT / "v2" / "services",
+-        build_cmd=["ruby", "-c", "market_stream.rb"],
++        build_cmd=["ruby", "-c", "market_stream.rb"],
+         clean_cmd=["echo", "Ruby has no build artifacts to clean"],
+     ),
+     Module(
+@@ -129,7 +137,7 @@
+         clean_cmd=["rm", "-rf", "build"],
+         build_dir=ROOT / "compliance" / "build",
+     ),
+-]
++]  # type: list[Module]
+ 
+ 
+ def run_module(module: Module, release: bool = False) -> dict:
+@@ -137,7 +145,7 @@
+     env = os.environ.copy()
+     if module.env:
+         env.update(module.env)
+-    
 +
-+from __future__ import annotations
-+
-+import argparse
-+import json
-+import sys
-+from dataclasses import dataclass, field
-+from pathlib import Path
-+from typing import Any, Optional
-+
-+
-+@dataclass
-+class VerificationResult:
-+    """Result of verifying a single table."""
-+    table_name: str
-+    expected_count: int
-+    actual_count: int = -1
-+    found: bool = False
-+
-+    @property
-+    def count_matches(self) -> bool:
-+        return self.found and self.actual_count == self.expected_count
-+
-+    def __str__(self) -> str:
-+        status = "✓" if self.count_matches else "✗"
-+        if not self.found:
-+            return f"{status} {self.table_name}: MISSING (expected {self.expected_count} rows)"
-+        return f"{status} {self.table_name}: {self.actual_count} rows (expected {self.expected_count})"
-+
-+
-+@dataclass
-+class VerificationReport:
-+    """Overall verification report."""
-+    results: list[VerificationResult] = field(default_factory=list)
-+    errors: list[str] = field(default_factory=list)
-+
-+    @property
-+    def missing_tables(self) -> list[VerificationResult]:
-+        return [r for r in self.results if not r.found]
-+
-+    @property
-+    def mismatched_counts(self) -> list[VerificationResult]:
-+        return [r for r in self.results if r.found and not r.count_matches]
-+
-+    @property
-+    def is_valid(self) -> bool:
-+        return not self.missing_tables and not self.mismatched_counts and not self.errors
-+
-+    def summary(self) -> str:
-+        lines = [
-+            f"Tables checked: {len(self.results)}",
-+            f"Missing tables: {len(self.missing_tables)}",
-+            f"Count mismatches: {len(self.mismatched_counts)}",
-+            f"Errors: {len(self.errors)}",
-+        ]
-+        if self.is_valid:
-+            lines.append("Result: PASS")
-+        else:
-+            lines.append("Result: FAIL")
-+        return "\n".join(lines)
-+
-+
-+def load_expected(path: str) -> dict[str, int]:
-+    """Load expected table counts from a JSON file."""
-+    with open(path, "r", encoding="utf-8") as f:
-+        data = json.load(f)
-+
-+    # Support both flat {"table": count} and nested {"tables": {"table": count}} formats
-+    if "tables" in data:
-+        return {str(k): int(v) for k, v in data["tables"].items()}
-+    return {str(k): int(v) for k, v in data.items()}
-+
-+
-+def query_database_counts(dsn: str) -> dict[str, int]:
-+    """Query a PostgreSQL database for table row counts."""
-+    import psycopg2
-+
-+    counts: dict[str, int] = {}
-+    with psycopg2.connect(dsn) as conn:
-+        with conn.cursor() as cur:
-+            # Get all user tables in public schema
-+            cur.execute("""
-+                SELECT tablename
-+                FROM pg_tables
-+                WHERE schemaname = 'public'
-+                ORDER BY tablename
-+            """)
-+            tables = [row[0] for row in cur.fetchall()]
-+
-+            for table in tables:
-+                cur.execute(f"SELECT COUNT(*) FROM {table}")
-+                count = cur.fetchone()[0]
-+                counts[table] = count
-+
-+    return counts
-+
-+
-+def verify_backup(expected: dict[str, int], actual: dict[str, int]) -> VerificationReport:
-+    """Verify actual database counts against expected counts."""
-+    report = VerificationReport()
-+
-+    for table_name, expected_count in expected.items():
-+        result = VerificationResult(
-+            table_name=table_name,
-+            expected_count=expected_count,
-+            actual_count=actual.get(table_name, -1),
-+            found=table_name in actual,
-+        )
-+        report.results.append(result)
-+
-+    # Check for unexpected extra tables
-+    for table_name in actual:
-+        if table_name not in expected:
-+            report.errors.append(f"Unexpected table found: {table_name} ({actual[table_name]} rows)")
-+
-+    return report
-+
-+
-+def run_dry_run(expected: dict[str, int]) -> VerificationReport:
-+    """Simulate a verification with synthetic data for testing the tool."""
-+    # Simulate: first table matches, second is missing, third has wrong count
-+    actual: dict[str, int] = {}
-+    for i, (table, count) in enumerate(expected.items()):
-+        if i == 1:
-+            continue  # Skip second table to simulate missing
-+        if i == 2:
-+            actual[table] = count + 100  # Wrong count
-+        else:
-+            actual[table] = count
-+
-+    return verify_backup(expected, actual)
-+
-+
-+def generate_sample() -> dict[str, Any]:
-+    """Generate a sample expected counts file."""
-+    return {
-+        "description": "Expected table row counts for backup verification",
-+        "environment": "staging",
-+        "tables": {
-+            "users": 15420,
-+            "accounts": 8750,
-+            "transactions": 987654,
-+            "orders": 345000,
-+            "audit_log": 1200000,
+     # Rust release mode
+     if module.name == "backend" and release:
+         cmd = ["cargo", "build", "--release"]
+@@ -152,7 +160,7 @@
+         start = time.time()
+         result = subprocess.run(
+             cmd,
+-            cwd=str(module.dir),
++            cwd=str(module.dir) if module.dir else str(ROOT),
+             capture_output=True,
+             text=True,
+             env=env,
+@@ -169,7 +177,7 @@
+             "stderr": result.stderr,
+             "duration_sec": round(duration, 3),
+         }
+-    except Exception as e:
++    except subprocess.TimeoutExpired as e:
+         return {
+             "success": False,
+             "returncode": -1,
+@@ -177,6 +185,14 @@
+             "stderr": str(e),
+             "duration_sec": round(time.time() - start, 3),
+         }
++    except Exception as e:
++        return {
++            "success": False,
++            "returncode": -1,
++            "stdout": "",
++            "stderr": str(e),
++            "duration_sec": 0.0,
 +        }
-+    }
+ 
+ 
+ def encrypt_logd(source_path: Path, dest_path: Path, password: str) -> bool:
+@@ -184,7 +200,7 @@
+     try:
+         # Use openssl to encrypt the log file
+         with source_path.open("rb") as f:
+-            data = f.read()
++            data = f.read() if source_path.exists() else b""
+         
+         # Simple XOR encryption for demonstration (in production, use proper encryption)
+         encrypted = bytearray()
+@@ -193,7 +209,7 @@
+             encrypted.append(b ^ key_byte)
+         
+         dest_path.write_bytes(bytes(encrypted))
+-        return True
++        return dest_path.exists()
+     except Exception:
+         return False
+ 
+@@ -201,7 +217,7 @@
+ def generate_diagnostic_report(results: list[dict], commit_id: str) -> dict:
+     """Generate the diagnostic metadata report."""
+     report = {
+-        "commit_id": commit_id,
++        "commit": commit_id,
+         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+         "platform": {
+             "system": platform.system(),
+@@ -211,7 +227,7 @@
+         },
+         "user": getpass.getuser(),
+         "modules": [],
+-        "diagnostic_logd": None,
++        "diagnostic_logd": "",
+         "diagnostic_logd_error": None,
+     }
+     
+@@ -228,7 +244,7 @@
+             "language": module_name,
+             "success": result["success"],
+             "duration_sec": result["duration_sec"],
+-            "returncode": result["returncode"],
++            "return_code": result["returncode"],
+         })
+     
+     return report
+@@ -240,7 +256,7 @@
+     # Create a temporary log file
+     log_path = DIAGNOSTIC_DIR / f"build-{commit_id}.log"
+     with log_path.open("w") as f:
+-        f.write(f"Build diagnostic for commit {commit_id}\n")
++        f.write(f"Build diagnostic for commit {commit_id}\n")
+         f.write(f"Timestamp: {datetime.datetime.now(datetime.timezone.utc).isoformat()}\n")
+         f.write(f"Platform: {platform.system()} {platform.machine()}\n")
+         f.write(f"Python: {platform.python_version()}\n")
+@@ -254,7 +270,7 @@
+             f.write(f"  Duration: {result['duration_sec']}s\n")
+             f.write(f"  Stdout: {result['stdout'][:500]}\n")
+             f.write(f"  Stderr: {result['stderr'][:500]}\n")
+-    
 +
+     # Encrypt the log file
+     logd_path, metadata_path, _ = diagnostic_paths_for_commit()
+     password = "tent-of-trials-diag"
+@@ -264,7 +280,7 @@
+         report["diagnostic_logd"] = str(logd_path)
+     else:
+         report["diagnostic_logd_error"] = "Failed to encrypt diagnostic log"
+-    
 +
-+def main() -> int:
-+    parser = argparse.ArgumentParser(
-+        description="Verify backup restore integrity by checking table row counts.",
-+        formatter_class=argparse.RawDescriptionHelpFormatter,
-+        epilog="""
-+Examples:
-+  %(prog)s --expected counts.json --dsn "postgresql://user:pass@localhost/db"
-+  %(prog)s --expected counts.json --dry-run
-+  %(prog)s --
+     # Split large logd files
+     if logd_path.exists():
+         chunks = split_diagnostic_logd(logd_path)
+@@ -273,
