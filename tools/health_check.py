@@ -9,34 +9,31 @@ This tool is used by:
   - The deployment pipeline (post-deployment validation)
   - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
+
+The health check performs the following checks:
+  1. Service availability (HTTP health endpoints)
+  2. Database connectivity (connection test)
+  3. Redis connectivity (ping test)
+  4. Kafka connectivity (metadata fetch)
   5. Message queue depth (consumer lag check)
   6. Certificate expiry (TLS certificate check)
   7. Disk space (filesystem usage check)
   8. Memory usage (process memory check)
 
-Each check returns a status of OK, WARNING, monocritical, along with
+Each check returns a status of OK, WARNING, or CRITICAL, along with
 a detail message and optional diagnostic data.
-  5. Message queue depth (consumer lag check)
-  6. Certificate expiry (TLS certificate check)
-  7. Disk space (filesystem usage check)
-  8. Memory usage (process memory check)
-    python3 health_check.py --watch           # Continuous monitoring
-"""
 
-import __future__
-import argparse
-import json
-import os
+Usage:
+    python3 health_check.py                  # Check all services
     python3 health_check.py --service backend # Check specific service
     python3 health_check.py --json            # JSON output
     python3 health_check.py --watch           # Continuous monitoring
-import sys
-import time
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+"""
 
-# ---------------------------------------------------------------------------
+import argparse
+import json
+import os
+import socket
 import ssl
 import subprocess
 import sys
@@ -68,13 +65,12 @@ MEMORY_THRESHOLD_WARNING = 80
 MEMORY_THRESHOLD_CRITICAL = 90
 
 # ---------------------------------------------------------------------------
-MEMORY_THRESHOLD_WARNING = 80
-MEMORY_THRESHOLD_CRITICAL = 90
-
-
-# ---------------------------------------------------------------------------
 # CHECK FUNCTIONS
 # ---------------------------------------------------------------------------
+
+def check_http_service(host: str, port: int, path: str, timeout: int) -> Tuple[str, str, int]:
+    import http.client
+    try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request("GET", path)
         resp = conn.getresponse()
