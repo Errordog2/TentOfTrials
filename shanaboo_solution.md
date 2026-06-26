@@ -1,149 +1,173 @@
  ```diff
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
-@@ -9,6 +9,7 @@
-   - The monitoring system (periodic health checks)
-   - The on-call engineer (manual troubleshooting)
- 
-+
- The health check performs the following checks:
-   1. Service availability (HTTP health endpoints)
-   2. Database connectivity (connection test)
-@@ -30,6 +31,7 @@
+@@ -10,6 +10,7 @@
+ import argparse
+ import json
+ import os
++import platform
  import socket
  import ssl
  import subprocess
-+import platform
- import sys
+@@ -17,6 +18,7 @@
  import time
  from datetime import datetime
-@@ -120,6 +122,7 @@
- def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
-     """
-     Check system load average.
-+    Uses /proc/loadavg on Linux, falls back to os.getloadavg() on other platforms.
+ from typing import Any, Dict, List, Optional, Tuple
++import unittest
  
-     Returns:
-         Tuple of (status, detail, data)
-@@ -129,7 +131,7 @@
-         "detail": {},
-     }
+ # ---------------------------------------------------------------------------
+ # CONSTANTS
+@@ -118,6 +120,9 @@
+ MEMORY_THRESHOLD_WARNING = 80
+ MEMORY_THRESHOLD_CRITICAL = 90
  
--    try:
-+    if os.path.exists("/proc/loadavg"):
-         with open("/proc/loadavg", "r") as f:
-             line = f.read().strip()
-             parts = line.split()
-@@ -139,9 +141,20 @@
-             data["detail"]["load_1min"] = float(parts[0])
-             data["detail"]["load_5min"] = float(parts[1])
-             data["detail"]["load_15min"] = float(parts[2])
--    except Exception as e:
--        return "WARNING", f"Could not read load average: {e}", data
--
-+    else:
-+        try:
-+            load1, load5, load15 = os.getloadavg()
-+            data["detail"]["load_1min"] = load1
-+            data["detail"]["load_5min"] = load5
-+            data["detail"]["load_15min"] = load15
-+        except OSError as e:
-+            return "WARNING", f"Could not read load average: {e}", data
++# Platform detection
++IS_LINUX = platform.system() == "Linux"
 +
-+    # Ensure we have values to evaluate
-+    if "load_1min" not in data["detail"]:
-+        return "WARNING", "Load average data unavailable", data
-+
-+    load_1min = data["detail"]["load_1min"]
-     # Determine status based on load (assuming CPU count as a rough threshold)
+ # ---------------------------------------------------------------------------
+ # CHECK FUNCTIONS
+ # ---------------------------------------------------------------------------
+@@ -163,6 +168,7 @@
+         return "CRITICAL", str(e), 0
+ 
+ 
++def check_certificate_expiry(host: str,
+ def check_certificate_expiry(host: str, port: int, timeout: int = 5) -> Tuple[str, str, Optional[int]]:
      try:
-         cpu_count = os.cpu_count() or 1
-@@ -149,7 +162,6 @@
-         cpu_count = 1
+         context = ssl.create_default_context()
+@@ -194,8 +200,9 @@
+         return "CRITICAL", str(e), None
  
-     # Normalize load by CPU count for threshold comparison
--    load_1min = data["detail"]["load_1min"]
-     normalized_load = load_1min / cpu_count
  
-     if normalized_load > 2.0:
-@@ -165,6 +177,7 @@
- def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
-     """
-     Check system memory usage.
-+    Uses /proc/meminfo on Linux, falls back to psutil-like standard library approaches on other platforms.
- 
-     Returns:
-         Tuple of (status, detail, data)
-@@ -174,7 +187,7 @@
-         "detail": {},
-     }
- 
+-def check_memory_usage() -> Tuple[str, str, Optional[Dict[str, Any]]]:
 -    try:
-+    if os.path.exists("/proc/meminfo"):
++def _check_memory_linux() -> Tuple[str, str, Optional[Dict[str, Any]]]:
++    """Linux-specific memory check using /proc/meminfo."""
++    try:
          with open("/proc/meminfo", "r") as f:
              meminfo = f.read()
  
-@@ -196,8 +209,44 @@
-             data["detail"]["used_percent"] = round(used_percent, 2)
-             data["detail"]["total_mb"] = round(total / 1024, 2)
-             data["detail"]["available_mb"] = round(available / 1024, 2)
--    except Exception as e:
--        return "WARNING", f"Could not read memory info: {e}", data
+@@ -221,10 +228,76 @@
+             "percent": percent,
+         }
+ 
+-        if percent >= MEMORY_THRESHOLD_CRITICAL:
+-            return "CRITICAL", f"Memory usage {percent:.1f}%", data
+-        elif percent >= MEMORY_THRESHOLD_WARNING:
+-            return "WARNING", f"Memory usage {percent:.1f}%", data
++        return _memory_status_from_percent(percent, data)
++    except Exception as e:
++        return "WARNING", f"Failed to read /proc/meminfo: {e}", None
++
++
++def _check_memory_cross_platform() -> Tuple[str, str, Optional[Dict[str, Any]]]:
++    """Cross-platform memory check using psutil when available, or os-based fallbacks."""
++    try:
++        # Try psutil first (widely available, cross-platform)
++        import psutil
++        mem = psutil.virtual_memory()
++        percent = mem.percent
++        data: Dict[str, Any] = {
++            "total_kb": mem.total // 1024,
++            "available_kb": mem.available // 1024,
++            "percent": percent,
++        }
++        return _memory_status_from_percent(percent, data)
++    except ImportError:
++        pass
++
++    # Fallback: macOS vm_stat command
++    try:
++        if platform.system() == "Darwin":
++            result = subprocess.run(
++                ["vm_stat"],
++                capture_output=True,
++                text=True,
++                timeout=5,
++            )
++            if result.returncode == 0:
++                # Parse vm_stat output
++                lines = result.stdout.strip().split("\n")
++                stats = {}
++                for line in lines:
++                    if ":" in line:
++                        key, value = line.split(":", 1)
++                        # Remove 'Pages' prefix and extract number
++                        num_str = "".join(c for c in value if c.isdigit() or c == ".")
++                        if num_str:
++                            stats[key.strip()] = int(num_str)
++
++                # macOS page size is typically 4096 bytes
++                page_size = 4096
++                total = stats.get("Pages free", 0) + stats.get("Pages active", 0) + stats.get("Pages inactive", 0) + stats.get("Pages wired down", 0) + stats.get("Pages speculative", 0)
++                free = stats.get("Pages free", 0) + stats.get("Pages inactive", 0)
++
++                total_kb = (total * page_size) // 1024
++                available_kb = (free * page_size) // 1024
++
++                if total_kb > 0:
++                    percent = ((total_kb - available_kb) / total_kb) * 100
++                else:
++                    percent = 0
++
++                data: Dict[str, Any] = {
++                    "total_kb": total_kb,
++                    "available_kb": available_kb,
++                    "percent": percent,
++                }
++                return _memory_status_from_percent(percent, data)
++    except Exception:
++        pass
++
++    # Final fallback
++    return "WARNING", "Unable to determine memory usage on this platform", None
++
++
++def _memory_status_from_percent(percent: float, data: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
++    if percent >= MEMORY_THRESHOLD_CRITICAL:
++        return "CRITICAL", f"Memory usage {percent:.1f}%", data
++    elif percent >= MEMORY_THRESHOLD_WARNING:
++        return "WARNING", f"Memory usage {percent:.1f}%", data
 +    else:
-+        # Fallback for non-Linux systems using standard library
++        return "OK", f"Memory usage {percent:.1f}%", data
++
++
++def check_memory_usage() -> Tuple[str, str, Optional[Dict[str, Any]]]:
++    """Check memory usage with Linux /proc fallback for cross-platform support."""
++    if IS_LINUX:
++        return _check_memory_linux()
++    else:
++        return _check_memory_cross_platform()
++
++
++def _check_load_linux() -> Tuple[str, str, Optional[Dict[str, Any]]]:
++    """Linux-specific load check using /proc/loadavg."""
++    try:
++        with open("/proc/loadavg", "r") as f:
++            loadavg = f.read().strip().split()
++
++        one_min = float(loadavg[0])
++        five_min = float(loadavg[1])
++        fifteen_min = float(loadavg[2])
++
++        # Try to get CPU count for context
 +        try:
-+            # Try using vm_statistics on macOS or other platform-specific approaches
-+            # First, try to use subprocess to get memory info in a cross-platform way
-+            if platform.system() == "Darwin":
-+                # macOS: use vm_statistics or sysctl
-+                result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
-+                if result.returncode == 0:
-+                    # Parse vm_stat output
-+                    vm_output = result.stdout
-+                    page_size = 4096  # Default page size on macOS
-+                    
-+                    # Extract values from vm_stat output
-+                    pages_free = 0
-+                    pages_active = 0
-+                    pages_inactive = 0
-+                    pages_wired = 0
-+                    
-+                    for line in vm_output.splitlines():
-+                        if "Pages free:" in line:
-+                            pages_free = int(line.split(":")[1].strip().replace(".", ""))
-+                        elif "Pages active:" in line:
-+                            pages_active = int(line.split(":")[1].strip().replace(".", ""))
-+                        elif "Pages inactive:" in line:
-+                            pages_inactive Dupcheck
-+                            pages_inactive = int(line.split(":")[1].strip().replace(".", ""))
-+                        elif "Pages wired down:" in line:
-+                            pages_wired = int(line.split(":")[1].strip().replace(".", ""))
-+                    
-+                    total_pages = pages_free + pages_active + pages_inactive + pages_wired
-+                    used_pages = pages_active + pages_inactive + pages_wired
-+                    
-+                    if total_pages > 0:
-+                        total_mb = (total_pages * page_size) / (1024 * 1024)
-+                        used_mb = (used_pages * page_size) / (1024 * 1024)
-+                        available_mb = total_mb - used_mb
-+                        used_percent = (used_mb / total_mb) * 100
-+                        
-+                        data["detail"]["used_percent"] = round(used_percent, 2)
-+                        data["detail"]["total_mb"] = round(total_mb, 2)
-+                        data["detail"]["available_mb"] = round(available_mb, 2)
-+            else:
-+                # Generic fallback: try to read from /sys or use a simple heuristic
-+                # This is a best-effort fallback for other Unix-like systems
-+                try:
-+                    # Try to get memory info from sysconf or other means
-+                    result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
-+                    if result.returncode == 0:
-+                        lines = result.stdout.strip().splitlines()
-+                        if len(lines) > 1:
-+                            mem_line = lines[1].split()
-+                            if len(mem_line) >= 3:
-+                                total_mb = float(mem_line[1])
-+                                used_mb = float(mem_line[2])
-+                                available_mb = total_mb - used_mb
-+                                used_percent = (used_mb / total_mb) * 100
-+                                data["detail"]["used_percent"] = round
++            cpu_count = os.cpu_count() or 1
++        except Exception:
++            cpu_count = 1
++
++        # Normalize load by CPU count for threshold comparison
++        normalized = one_min / cpu_count
++
++        data: Dict[str, Any] = {
++            "1min": one_min,
++            "5min": five_min,
++            "15min": fifteen_min,
++            "cpus": cpu_count,
++            "normalized": normalized,
++        }
++
++        if normalized >= 2.0:
++            return "CRITICAL", f"Load average {one_min:.2f} (normalized {normalized:.2f})", data
++        elif normalized >= 1.0:
++            return "WARNING", f"Load average {one_min:.2f} (normalized {
