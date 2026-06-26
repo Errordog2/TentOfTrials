@@ -2,169 +2,137 @@
 --- a/tools/health_check.py
 +++ b/tools/health_check.py
 @@ -14,6 +14,7 @@
+ import argparse
  import json
  import os
- import socket
 +import platform
+ import socket
  import ssl
  import subprocess
- import sys
-@@ -165,6 +166,9 @@
+@@ -143,6 +144,9 @@
  
  
- def check_memory_usage() -> Tuple[str, str, int]:
-+    if platform.system() != "Linux":
-+        return _check_memory_usage_cross_platform()
-+
+ def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
++    """
++    Check memory usage. On Linux, reads /proc/meminfo. On other platforms, uses psutil or os-level fallbacks.
++    """
+ ht
      try:
          with open("/proc/meminfo", "r") as f:
-             meminfo = f.read()
-@@ -195,7 +199,55 @@
-         return "CRITICAL", f"Failed to read memory info: {e}", 0
+@@ -163,8 +167,55 @@
+             detail = f"Memory usage is {usage_percent:.1f}% ({used_mb:.0f}MB / {total_mb:.0f}MB)"
  
- 
-+def _check_memory_usage_cross_platform() -> Tuple[str, str, int]:
-+    """Fallback memory check for non-Linux systems using psutil or standard library."""
-+    try:
-+        # Try psutil first (common cross-platform library)
-+        import psutil
-+        mem = psutil.virtual_memory()
-+        total = mem.total
-+        available = mem.available
-+        used = total - available
-+        percent = mem.percent
+         return status, detail, {"usage_percent": usage_percent, "used_mb": used_mb, "total_mb": total_mb}
+-    except FileNotFoundError:
+-        return "WARNING", "/proc/meminfo not available", {}
++    except (FileNotFoundError, OSError):
++        # Fallback for non-Linux systems
++        try:
++            # Try psutil first (commonly available)
++            import psutil
++            mem = psutil.virtual_memory()
++            usage_percent = mem.percent
++            used_mb = (mem.used) / (1024 * 1024)
++            total_mb = (mem.total) / (1024 * 1024)
 +
-+        status = "OK"
-+        if percent >= MEMORY_THRESHOLD_CRITICAL:
-+            status = "CRITICAL"
-+        elif percent >= MEMORY_THRESHOLD_WARNING:
-+            status = "WARNING"
-+
-+        total_gb = total / (1024 ** 3)
-+        used_gb = used / (1024 ** 3)
-+        detail = f"{used_gb:.1f}GB / {total_gb:.1f}GB ({percent:.0f}%)"
-+        return status, detail, int(percent)
-+    except ImportError:
-+        pass
-+
-+    # Fallback to vm_statistics on macOS or generic fallback
-+    try:
-+        if platform.system() == "Darwin":
-+            # Use vm_statistics or sysctl for macOS
-+            result = subprocess.run(
-+                ["vm_stat"],
-+                capture_output=True,
-+                text=True,
-+                timeout=5,
-+            )
-+            if result.returncode == 0:
-+                # Parse vm_stat output (approximate)
-+                lines = result.stdout.strip().split("\n")
-+                # Return a basic OK with parsed info if possible, else generic
++            if usage_percent >= MEMORY_THRESHOLD_CRITICAL:
++                status = "CRITICAL"
++            elif usage_percent >= MEMORY_THRESHOLD_WARNING:
++                status = "WARNING"
++            else:
 +                status = "OK"
-+                detail = "Memory check via vm_stat (macOS)"
-+                return status, detail, 0
-+    except Exception:
-+        pass
 +
-+    # Ultimate fallback: report that we can't determine memory usage
-+    return "WARNING", "Unable to determine memory usage on this platform", 0
++            detail = f"Memory usage is {usage_percent:.1f}% ({used_mb:.0f}MB / {total_mb:.0f}MB)"
++            return status, detail, {"usage_percent": usage_percent, "used_mb": used_mb, "total_mb": total_mb}
++        except ImportError:
++            pass
 +
++        # Fallback to sysctl on macOS/BSD
++        try:
++            if platform.system() == "Darwin":
++                result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5)
++                if result.returncode == 0:
++                    total_bytes = int(result.stdout.strip())
++                    total_mb = total_bytes / (1024 * 1024)
++                    # Try to get used memory via vm_statistics (approximate)
++                    vm_result = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
++                    if vm_result.returncode == 0:
++                        # Parse vm_stat output for active + wired pages
++                        lines = vm_result.stdout.splitlines()
++                        page_size = 4096  # Default macOS page size
++                        active_pages = wired_pages = 0
++                        for line in lines:
++                            if "page size" in line.lower():
++                                page_size = int(line.split()[-2])
++                            elif "Pages active" in line:
++                                active_pages = int(line.split()[-1].rstrip("."))
++                            elif "Pages wired down" in line:
++                                wired_pages = int(line.split()[-1].rstrip("."))
++                        used_mb = ((active_pages + wired_pages) * page_size) / (1024 * 1024)
++                        usage_percent = (used_mb / total_mb) * 100
++                        detail = f"Memory usage is {usage_percent:.1f}% ({used_mb:.0f}MB / {total_mb:.0f}MB)"
++                        status = "CRITICAL" if usage_percent >= MEMORY_THRESHOLD_CRITICAL else ("WARNING" if usage_percent >= MEMORY_THRESHOLD_WARNING else "OK")
++                        return status, detail, {"usage_percent": usage_percent, "used_mb": used_mb, "total_mb": total_mb}
++        except Exception:
++            pass
 +
- def check_load_average() -> Tuple[str, str, float]:
-+    if platform.system() != "Linux":
-+        return _check_load_average_cross_platform()
++        return "WARNING", "Memory check: /proc/meminfo not available and no fallback succeeded", {}
+     except Exception as e:
+         return "CRITICAL", f"Memory check failed: {e}", {}
+ 
+@@ -172,6 +223,9 @@
+ def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
+     """
+     Check the system load average.
 +
++    On Linux, reads /proc/loadavg. On other platforms, falls back to os.getloadavg()
++    or other standard-library mechanisms.
+     """
      try:
          with open("/proc/loadavg", "r") as f:
-             loadavg = f.read().strip().split()
-@@ -209,6 +261,34 @@
-         return "CRITICAL", f"Failed to read load average: {e}", 0.0
+@@ -188,8 +242,35 @@
+                 status = "OK"
  
- 
-+def _check_load_average_cross_platform() -> Tuple[str, str, float]:
-+    """Fallback load average check for non-Linux systems using os.getloadavg()."""
-+    try:
-+        load1, load5, load15 = os.getloadavg()
-+        # Try to get CPU count for context
+             return status, f"Load average (1m): {load_1m:.2f}", {"load_1m": load_1m}
+-    except FileNotFoundError:
+-        return "WARNING", "/proc/loadavg not available", {}
++    except (FileNotFoundError, OSError):
++        # Fallback for non-Linux systems
 +        try:
-+            cpu_count = os.cpu_count() or 1
++            load_1m, load_5m, load_15m = os.getloadavg()
++            # Try to get CPU count for context
++            try:
++                cpu_count = os.cpu_count() or 1
++            except Exception:
++                cpu_count = 1
++
++            # Normalize load by CPU count for threshold comparison
++            normalized_load = load_1m / cpu_count
++
++            if normalized_load >= 2.0:
++                status = "CRITICAL"
++            elif normalized_load >= 1.0:
++                status = "WARNING"
++            else:
++                status = "OK"
++
++            detail = f"Load average (1m): {load_1m:.2f} (normalized: {normalized_load:.2f} on {cpu_count} CPUs)"
++            return status, detail, {"load_1m": load_1m, "load_5m": load_5m, "load_15m": load_15m, "cpu_count": cpu_count, "normalized_load": normalized_load}
++        except (AttributeError, OSError):
++            # os.getloadavg() not available on this platform (e.g., Windows)
++            pass
++
++        # Final fallback: try uptime command
++        try:
++            result = subprocess.run(["uptime"], capture_output=True, text=True, timeout=5)
++            if result.returncode == 0:
++                return "WARNING", f"Load check fallback: {result.stdout.strip()}", {}
 +        except Exception:
-+            cpu_count = 1
++            pass
 +
-+        # Normalize load by CPU count for consistent thresholds
-+        normalized_load = load1 / cpu_count
-+
-+        if normalized_load >= 2.0:
-+            status = "CRITICAL"
-+        elif normalized_load >= 1.0:
-+            status = "WARNING"
-+        else:
-+            status = "OK"
-+
-+        detail = f"Load average: {load1:.2f} (1min), {load5:.2f} (5min), {load15:.2f} (15min) on {cpu_count} CPUs"
-+        return status, detail, float(load1)
-+    except OSError:
-+        # getloadavg() not available on this platform (e.g., Windows)
-+        return "WARNING", "Load average not available on this platform", 0.0
-+    except Exception as e:
-+        return "CRITICAL", f"Failed to get load average: {e}", 0.0
-+
-+
- def check_disk_space(path: str = "/") -> Tuple[str, str, int]:
-     try:
-         stat = os.statvfs(path)
-@@ -316,6 +396,7 @@
-     parser.add_argument("--service", type=str, help="Check a specific service")
-     parser.add_argument("--json", action="store_true", help="Output in JSON format")
-     parser.add_argument("--watch", action="store_true", help="Continuous monitoring")
-+    parser.add_argument("--test-fallbacks", action="store_true", help="Test fallback behavior by simulating missing /proc files")
-     args = parser.parse_args()
++        return "WARNING", "Load average: /proc/loadavg not available and no fallback succeeded", {}
+     except Exception as e:
+         return "CRITICAL", f"Load check failed: {e}", {}
  
-     if args.watch:
-@@ -327,6 +408,10 @@
-             time.sleep(5)
-     else:
-         try:
-+            if args.test_fallbacks:
-+                result = test_fallbacks()
-+                print(result)
-+                sys.exit(0)
-             result = run_health_check(service=args.service)
-             if args.json:
-                 print(json.dumps(result, indent=2))
-@@ -340,5 +425,49 @@
-             sys.exit(1)
- 
- 
-+def test_fallbacks() -> str:
-+    """Test fallback behavior by temporarily mocking Linux-specific paths as unavailable."""
-+    import tempfile
-+
-+    results = []
-+
-+    # Test memory fallback
-+    original_system = platform.system
-+    try:
-+        # Mock as non-Linux to trigger fallback path
-+        platform.system = lambda: "Darwin"
-+
-+        # Verify we don't hit /proc/meminfo
-+        status, detail, percent = check_memory_usage()
-+        results.append(f"Memory fallback: {status} - {detail} ({percent}%)")
-+
-+        # Verify we don't hit /proc/loadavg
-+        status, detail, load = check_load_average()
-+        results.append(f"Load fallback: {status} - {detail} ({load})")
-+
-+        # Also test with a mocked Linux but missing /proc files
-+        platform.system = lambda: "Linux"
-+
-+        # Temporarily break /proc/meminfo access by using a bad path
-+        # We can't easily mock open, but we can verify the function exists
-+        # and has proper error handling by checking it doesn't crash
-+        # when /proc is not available (e.g., in a container without it)
-+
-+        # Test that os.getloadavg fallback works on Linux too when /proc/loadavg is missing
-+        # by directly calling the cross-platform function
-+
+@@ -345,6 +426,9 @@
+     parser.add_argument("--service", type=str, help="Check specific service")
