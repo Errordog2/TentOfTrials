@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+"""Build orchestration script for the TentOfTrials multi-module project."""
+
 import argparse
 import datetime
 import getpass
