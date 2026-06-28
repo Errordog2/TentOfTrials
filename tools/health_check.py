@@ -10,31 +10,31 @@ This tool is used by:
   - The monitoring system (periodic health checks)
   - The on-call engineer (manual troubleshooting)
 
-
 The health check performs the following checks:
-  1. Service availability (HTTP health endpoints)
-  2. Database connectivity (connection test)
-  3. Redis connectivity (ping test)
-  4. Kafka connectivity (metadata fetch)
-  5. Message queue depth (consumer lag check)
-  6. Certificate expiry (TLS certificate check)
-  7. Disk space (filesystem usage check)
-  8. Memory usage (process memory check)
-
-Each check returns a status of OK, WARNING, or CRITICAL, along with
-a detail message and optional diagnostic data.
-
-Usage:
-    python3 health_check.py                  # Check all services
-    python3 health_check.py --service backend # Check specific service
-    python3 health_check.py --json            # JSON output
 import json
 import os
 import socket
-import platform
+import shutil
 import ssl
 import subprocess
 import sys
+  7. Disk space (filesystem usage check)
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+    python3 health_check.py                  # Check all services
+    python3 health_check.py --service backend # Check specific service
+    python3 health_check.py --json            # JSON output
+    python3 health_check.py --watch           # Continuous monitoring
+"""
+
+import argparse
+import json
+import os
 import socket
 import ssl
 import subprocess
@@ -141,16 +141,14 @@ def check_disk_usage(path: str = "/") -> Tuple[str, str, float]:
         used = total - free
         pct = (used / total) * 100
 
-
-def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
-    if platform.system() != "Linux":
-        return _check_memory_usage_cross_platform()
-
+        if pct < DISK_THRESHOLD_WARNING:
+def check_disk_space(path: str = "/") -> Tuple[str, str, Dict[str, Any]]:
+    """Check disk usage for the given path."""
     try:
-        with open("/proc/meminfo", "r") as f:
-            meminfo = f.read()
-            return "CRITICAL", f"{pct:.1f}% used ({used // (1024**3)}GB/{total // (1024**3)}GB)", pct
-    except Exception as e:
+        import shutil
+        usage = shutil.disk_usage(path)
+        total = usage.total
+        used = usage.used
         return "WARNING", f"Cannot check: {e}", 0
 
 
@@ -165,12 +163,13 @@ def check_memory_usage() -> Tuple[str, str, float]:
                     value = parts[1].strip().replace(" kB", "")
                     try:
                         meminfo[key] = int(value) * 1024
-                    except ValueError:
-                        pass
+def check_memory_usage() -> Tuple[str, str, Dict[str, Any]]:
+    """Check system memory usage."""
+    try:
+        # Linux path: read /proc/meminfo
+        with open("/proc/meminfo", "r") as f:
+            meminfo = f.read()
 
-        total = meminfo.get("MemTotal", 0)
-        available = meminfo.get("MemAvailable", 0)
-        used = total - available
         pct = (used / total) * 100 if total > 0 else 0
 
         if pct < MEMORY_THRESHOLD_WARNING:
@@ -180,80 +179,12 @@ def check_memory_usage() -> Tuple[str, str, float]:
         else:
             return "CRITICAL", f"{pct:.1f}% used", pct
     except Exception as e:
-        return "WARNING", f"Could not read /proc/meminfo: {e}", {}
+        return "WARNING", f"Cannot check: {e}", 0
 
 
-def _check_memory_usage_cross_platform() -> Tuple[str, str, Dict[str, Any]]:
+def check_load_average() -> Tuple[str, str, float]:
     try:
-        import psutil
-        mem = psutil.virtual_memory()
-        total_mb = mem.total / (1024 * 1024)
-        available_mb = mem.available / (1024 * 1024)
-        used_mb = total_mb - available_mb
-        percent = mem.percent
-
-        status = "OK"
-        if percent >= MEMORY_THRESHOLD_CRITICAL:
-            status = "CRITICAL"
-        elif percent >= MEMORY_THRESHOLD_WARNING:
-            status = "WARNING"
-
-        detail = f"Memory usage: {percent:.1f}% ({used_mb:.0f}MB / {total_mb:.0f}MB)"
-        data = {
-            "total_mb": round(total_mb, 2),
-            "used_mb": round(used_mb, 1),
-            "available_mb": round(available_mb, 1),
-            "percent": round(percent, 1),
-        }
-        return status, detail, data
-    except ImportError:
-        pass
-
-    try:
-        import ctypes
-        class MEMORYSTATUS(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes DWORD),
-                        ("dwTotalPhys", ctypes.c_size_t),
-                        ("dwAvailPhys", ctypes.c_size_t),
-                        ("dwTotalPageFile", ctypes.c_size_t),
-                        ("dwAvailPageFile", ctypes.c_size_t),
-                        ("dwTotalVirtual", ctypes.c_size_t),
-                        ("dwAvailVirtual", ctypes.c_size_t)]
-        memoryStatus = MEMORYSTATUS()
-        memoryStatus.dwLength = ctypes.sizeof(MEMORYSTATUS)
-        ctypes.windll.kernel32.GlobalMemoryStatus(ctypes.byref(memoryStatus))
-        total_mb = memoryStatus.dwTotalPhys / (1024 * 1024)
-        available_mb = memoryStatus.dwAvailPhys / (1024 * 1024)
-        used_mb = total_mb - available_mb
-        percent = memoryStatus.dwMemoryLoad
-
-        status = "OK"
-        if percent >= MEMORY_THRESHOLD_CRITICAL:
-            status = "CRITICAL"
-        elif percent >= MEMORY_THRESHOLD_WARNING:
-            status = "WARNING"
-
-        detail = f"Memory usage: {percent:.1f}% ({used_mb:.0f}MB / {total_mb:.0f}MB)"
-        data = {
-            "total_mb": round(total_mb, 2),
-            "used_mb": round(used_mb, 1),
-            "available_mb": round(available_mb, 1),
-            "percent": round(percent, 1),
-        }
-        return status, detail, data
-    except Exception:
-        pass
-
-    return "WARNING", "Memory check unavailable on this platform", {}
-
-
-def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
-    if platform.system() != "Linux":
-        return _check_load_average_cross_platform()
-
-    try:
-        with open("/proc/loadavg", "r") as f:
+        with open("/proc/loadavg") as f:
             parts = f.read().strip().split()
             load = float(parts[0])
             cpu_count = os.cpu_count() or 1
@@ -264,47 +195,65 @@ def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
             elif load_pct < 90:
                 return "WARNING", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
             else:
-                return "CRITICAL", f"Load: {load} ({load_pct:.0f}% of {cpu_count} cores)", load
-    except Exception as e:
-        return "WARNING", f"Could not read /proc/loadavg: {e}", {}
-
-
-def _check_load_average_cross_platform() -> Tuple[str, str, Dict[str, Any]]:
-    try:
-        load1, load5, load15 = os.getloadavg()
-        status = "OK"
-        detail = f"Load average: {load1:.2f} (1min), {load5:.2f} (5min), {load15:.2f} (15min)"
-        data = {
-            "load_1min": round(load1, 2),
-            "load_5min": round(load5, 2),
-            "load_15min": round(load15, 2),
+            "available_mb": available_mb,
+            "percent_used": percent_used,
         }
-        return status, detail, data
-    except OSError:
-        pass
+    except FileNotFoundError:
+        # Non-Linux fallback using psutil if available
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            total_mb = mem.total / (1024 * 1024)
+            available_mb = mem.available / (1024 * 1024)
+            used_mb = total_mb - available_mb
+            percent_used = mem.percent
 
+            if percent_used >= MEMORY_THRESHOLD_CRITICAL:
+                result = "CRITICAL"
+            elif percent_used >= MEMORY_THRESHOLD_WARNING:
+                result = "WARNING"
+            else:
+                result = "OK"
+
+            detail = f"Memory {percent_used:.1f}% used ({used_mb:.0f}/{total_mb:.0f} MB)"
+
+            return result, detail, {
+                "total_mb": total_mb,
+                "used_mb": used_mb,
+                "available_mb": available_mb,
+                "percent_used": percent_used,
+            }
+        except ImportError:
+            # Final fallback: try to use os-level info or return warning
+            return "WARNING", "Memory check unavailable on this platform (psutil not installed)", {}
+    except Exception as e:
+        return "CRITICAL", f"Memory check failed: {e}", {}
+
+
+def check_load_average() -> Tuple[str, str, Dict[str, Any]]:
+    """Check system load average."""
     try:
-        import psutil
-        cpu_percent = psutil.cpu_percent(interval=1)
-        status = "OK"
-        if cpu_percent >= 90:
-            status = "CRITICAL"
-        elif cpu_percent >= 80:
-            status = "WARNING"
-        detail = f"CPU usage: {cpu_percent:.1f}%"
-        data = {"cpu_percent": round(cpu_percent, 1)}
-        return status, detail, data
-    except ImportError:
-        pass
+        # Linux path: read /proc/loadavg
+        with open("/proc/loadavg", "r") as f:
+            load_data = f.read().strip()
+        load1, load5, load15 = load_data.split()[:3]
+        detail = f"Load average: {load1} (1min), {load5} (5min), {load15} (15min)"
+        return "OK", detail, {"load1": float(load1), "load5": float(load5), "load15": float(load15)}
+    except FileNotFoundError:
+        # Non-Linux fallback using os.getloadavg()
+        try:
+            load1, load5, load15 = os.getloadavg()
+            detail = f"Load average: {load1:.2f} (1min), {load5:.2f} (5min), {load15:.2f} (15min)"
+            return "OK", detail, {"load1": load1, "load5": load5, "load15": load15}
+        except (AttributeError, OSError):
+            return "WARNING", "Load average check unavailable on this platform", {}
+    except Exception as e:
+        return "CRITICAL", f"Load average check failed: {e}", {}
 
-    return "WARNING", "Load average check unavailable on this platform", {}
 
-
-def check_disk_space(path: str = "/") -> Tuple[str, str, Dict[str, Any]]:
-    try:
-        stat = os.statvfs(path)
-
-def run_health_checks(service: Optional[str] = None, json_output: bool = False) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
     results: Dict[str, Any] = {
         "timestamp": datetime.now().isoformat(),
         "hostname": socket.gethostname(),
@@ -351,12 +300,16 @@ def run_health_checks(service: Optional[str] = None, json_output: bool = False) 
     if disk_status == "CRITICAL":
         all_ok = False
 
-    mem_status, mem_detail, mem_pct = check_memory_usage()
-    results["system"]["memory"] = {"status": mem_status, "detail": mem_detail}
-    if mem_status == "CRITICAL":
-        all_ok = False
+    disk_result, disk_detail, disk_data = check_disk_space()
+    print(f"  Disk: {disk_result} - {disk_detail}")
 
-    load_status, load_detail, load_val = check_load_average()
+    # Memory check
+    mem_result, mem_detail, mem_data = check_memory_usage()
+    print(f"  Memory: {mem_result} - {mem_detail}")
+
+    # Overall status
+    overall = "OK"
+    for service, result in results.items():
     results["system"]["load"] = {"status": load_status, "detail": load_detail}
 
     # Check certificate expiry (web services)
@@ -371,22 +324,24 @@ def run_health_checks(service: Optional[str] = None, json_output: bool = False) 
                 "days_remaining": days_left,
             }
             if cert_status == "CRITICAL":
-                all_ok = False
-
-    results["overall_status"] = "OK" if all_ok else "DEGRADED"
-
-    return results
-
+            "checks": {
+                "services": {name: {"status": r[0], "detail": r[1], "latency_ms": r[2]} for name, r in results.items()},
+                "disk": {"status": disk_result, "detail": disk_detail, "data": disk_data},
+                "memory": {"status": mem_result, "detail": mem_detail, "data": mem_data},
+            },
+            "overall": overall,
+        }
 
 def print_health_report(results: Dict[str, Any]):
     print(f"\n{'='*60}")
     print(f"  HEALTH CHECK REPORT")
-    print(f"  Host: {results['hostname']}")
-    print(f"  Time: {results['timestamp']}")
-    print(f"  Overall: {results['overall_status']}")
-    print(f"{'='*60}")
+        print(f"\nOverall: {overall}")
+        print(f"  Services checked: {len(results)}")
+        print(f"  Disk: {disk_result}")
+        print(f"  Memory: {mem_result}")
 
-    for category, items in [("Services", results["services"]),
+
+if __name__ == "__main__":
                              ("Infrastructure", results["infrastructure"]),
                              ("System", results["system"])]:
         if items:
@@ -453,26 +408,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    parser.add_argument("--service", type=str, help="Check specific service")
-    parser.add_argument("--json", action="store_true", help="Output as JSON")
-    parser.add_argument("--watch", action="store_true", help="Continuous monitoring")
-    parser.add_argument("--test-fallbacks", action="store_true", help="Test fallback behavior by simulating non-Linux platform")
-    args = parser.parse_args()
-
-    if args.watch:
-            time.sleep(5)
-            print("\n" + "=" * 70)
-    else:
-        if args.test_fallbacks:
-            # Temporarily override platform.system to simulate non-Linux
-            original_system = platform.system
-            platform.system = lambda: "Darwin"
-            try:
-                run_health_check(args.service, args.json)
-            finally:
-                platform.system = original_system
-            return
-        run_health_check(args.service, args.json)
-
-
-if __name__ == "__main__":
